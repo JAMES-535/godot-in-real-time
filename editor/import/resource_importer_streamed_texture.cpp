@@ -74,6 +74,7 @@ String ResourceImporterStreamedTexture::get_visible_name() const {
 }
 void ResourceImporterStreamedTexture::get_recognized_extensions(List<String> *p_extensions) const {
 	ImageLoader::get_recognized_extensions(p_extensions);
+	p_extensions->push_back("dds");
 }
 
 String ResourceImporterStreamedTexture::get_save_extension() const {
@@ -90,13 +91,22 @@ void ResourceImporterStreamedTexture::get_import_options(const String &p_path, L
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "compress/channel_pack", PROPERTY_HINT_ENUM, "sRGB Friendly,Optimized"), 0));
 
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "roughness/mode", PROPERTY_HINT_ENUM, "Detect,Disabled,Red,Green,Blue,Alpha,Gray"), 0));
-	r_options->push_back(ImportOption(PropertyInfo(Variant::STRING, "roughness/src_normal", PROPERTY_HINT_FILE, "*.bmp,*.exr,*.jpeg,*.jpg,*.hdr,*.png,*.svg,*.tga,*.webp"), ""));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::STRING, "roughness/src_normal", PROPERTY_HINT_FILE, "*.bmp,*.dds,*.exr,*.jpeg,*.jpg,*.hdr,*.png,*.svg,*.tga,*.webp"), ""));
 
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "streaming/min_lod_override", PROPERTY_HINT_ENUM, "Settings,0,1,2,3,4,5,6,7,8,9,10,11,12,13"), 0));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "streaming/max_lod_override", PROPERTY_HINT_ENUM, "Settings,0,1,2,3,4,5,6,7,8,9,10,11,12,13"), 0));
 }
 
 bool ResourceImporterStreamedTexture::get_option_visibility(const String &p_path, const String &p_option, const HashMap<StringName, Variant> &p_options) const {
+	const String extension = p_path.get_extension().to_lower();
+	if (extension == "dds") {
+		// DDS files are already compressed; only streaming overrides are relevant.
+		if (p_option == "streaming/min_lod_override" || p_option == "streaming/max_lod_override") {
+			return true;
+		}
+		return false;
+	}
+
 	return true;
 }
 
@@ -116,48 +126,61 @@ Error ResourceImporterStreamedTexture::import(ResourceUID::ID p_source_id, const
 
 	Image::CompressSource comp_source = srgb_friendly_pack ? Image::COMPRESS_SOURCE_SRGB : Image::COMPRESS_SOURCE_GENERIC;
 
-	err = ImageLoader::load_image(p_source_file, image);
-
-	// Roughness.
-	const int roughness = p_options["roughness/mode"];
-	const bool detect_roughness = roughness == 0;
-
-	// Normal map.
-	const String normal_map = p_options["roughness/src_normal"];
-	const int normal = p_options["compress/normal_map"];
-	const bool detect_normal = normal == 0; // Normal is set to Detect
-	const bool force_normal = normal == 1; // Normal is set to Enable
-
-	if (detect_normal || force_normal) {
-		save_flags |= StreamedTexture2D::FORMAT_BIT_DETECT_NORMAL;
-	}
-
-	if (detect_roughness) {
-		save_flags |= StreamedTexture2D::FORMAT_BIT_DETECT_ROUGHNESS;
-	}
-
-	if (force_normal) {
-		comp_source = Image::COMPRESS_SOURCE_NORMAL;
-	}
-
-	// Load the normal image.
-	Ref<Image> normal_image;
-	Image::RoughnessChannel roughness_channel = Image::ROUGHNESS_CHANNEL_R;
-
-	if (roughness > 1 && FileAccess::exists(normal_map)) {
-		normal_image.instantiate();
-		if (ImageLoader::load_image(normal_map, normal_image) == OK) {
-			roughness_channel = Image::RoughnessChannel(roughness - 2);
+	const String extension = p_source_file.get_extension().to_lower();
+	if (extension == "dds") {
+		// DDS files are loaded directly without additional processing.
+		// They typically contain pre-compressed data with mipmaps already generated,
+		// so roughness/normal detection and mipmap generation are skipped.
+		Vector<uint8_t> data = FileAccess::get_file_as_bytes(p_source_file);
+		if (data.is_empty()) {
+			return ERR_CANT_OPEN;
 		}
-	}
 
-	if (!image->has_mipmaps() || force_normal) {
-		image->generate_mipmaps(force_normal);
-	}
+		err = image->load_dds_from_buffer(data);
+	} else {
+		err = ImageLoader::load_image(p_source_file, image);
 
-	// Generate roughness mipmaps from normal texture.
-	if (image->has_mipmaps() && normal_image.is_valid()) {
-		image->generate_mipmap_roughness(roughness_channel, normal_image);
+		// Roughness.
+		const int roughness = p_options["roughness/mode"];
+		const bool detect_roughness = roughness == 0;
+
+		// Normal map.
+		const String normal_map = p_options["roughness/src_normal"];
+		const int normal = p_options["compress/normal_map"];
+		const bool detect_normal = normal == 0; // Normal is set to Detect
+		const bool force_normal = normal == 1; // Normal is set to Enable
+
+		if (detect_normal || force_normal) {
+			save_flags |= StreamedTexture2D::FORMAT_BIT_DETECT_NORMAL;
+		}
+
+		if (detect_roughness) {
+			save_flags |= StreamedTexture2D::FORMAT_BIT_DETECT_ROUGHNESS;
+		}
+
+		if (force_normal) {
+			comp_source = Image::COMPRESS_SOURCE_NORMAL;
+		}
+
+		// Load the normal image.
+		Ref<Image> normal_image;
+		Image::RoughnessChannel roughness_channel = Image::ROUGHNESS_CHANNEL_R;
+
+		if (roughness > 1 && FileAccess::exists(normal_map)) {
+			normal_image.instantiate();
+			if (ImageLoader::load_image(normal_map, normal_image) == OK) {
+				roughness_channel = Image::RoughnessChannel(roughness - 2);
+			}
+		}
+
+		if (!image->has_mipmaps() || force_normal) {
+			image->generate_mipmaps(force_normal);
+		}
+
+		// Generate roughness mipmaps from normal texture.
+		if (image->has_mipmaps() && normal_image.is_valid()) {
+			image->generate_mipmap_roughness(roughness_channel, normal_image);
+		}
 	}
 
 	if (err != OK || image.is_null() || image->is_empty()) {
@@ -175,80 +198,86 @@ Error ResourceImporterStreamedTexture::import(ResourceUID::ID p_source_id, const
 	const uint32_t streaming_min = p_options.has("streaming/min_lod_override") ? uint32_t(p_options["streaming/min_lod_override"]) : 0;
 	const uint32_t streaming_max = p_options.has("streaming/max_lod_override") ? uint32_t(p_options["streaming/max_lod_override"]) : 0;
 
-	const bool can_s3tc_bptc = ResourceImporterTextureSettings::should_import_s3tc_bptc();
-	const bool can_etc2_astc = ResourceImporterTextureSettings::should_import_etc2_astc();
-	ERR_FAIL_COND_V_MSG(!can_s3tc_bptc && !can_etc2_astc, FAILED, "No supported compression formats are enabled in the project settings for streamed textures.");
-
-	// HDR handling.
-	const bool is_hdr = (image->get_format() >= Image::FORMAT_RF && image->get_format() <= Image::FORMAT_RGBE9995);
-	bool can_compress_hdr = hdr_compression > 0;
-	bool force_uncompressed = false;
-
-	if (is_hdr) {
-		bool has_alpha = image->detect_alpha() != Image::ALPHA_NONE;
-		if (has_alpha) {
-			// HDR with alpha is not compressible to BC6H/ASTC-HDR.
-			if (hdr_compression == 2) {
-				// User selected "Always", so force an alpha-less format.
-				if (image->get_format() == Image::FORMAT_RGBAF) {
-					image->convert(Image::FORMAT_RGBF);
-				} else if (image->get_format() == Image::FORMAT_RGBAH) {
-					image->convert(Image::FORMAT_RGBH);
-				}
-			} else {
-				can_compress_hdr = false;
-			}
-		}
-
-		// Fall back to RGBE9995 uncompressed if HDR compression is disabled.
-		if (!can_compress_hdr && image->get_format() != Image::FORMAT_RGBE9995) {
-			image->convert(Image::FORMAT_RGBE9995);
-			force_uncompressed = true;
-		}
-	}
-
-	if (force_uncompressed) {
-		// Save uncompressed (no platform variants needed).
-		Error err_unc = StreamedTexture2D::_save_data(p_save_path + ".stex", image, save_flags, streaming_min, streaming_max);
-		ERR_FAIL_COND_V_MSG(err_unc != OK, err_unc, "Failed to save uncompressed HDR streamed texture.");
+	if (extension == "dds") {
+		// Save directly without any recompression to avoid quality loss and artifacts.
+		Error err_dds = StreamedTexture2D::_save_data(p_save_path + ".stex", image, save_flags, streaming_min, streaming_max);
+		ERR_FAIL_COND_V_MSG(err_dds != OK, err_dds, "Failed to save DDS streamed texture.");
 	} else {
-		if (can_s3tc_bptc) {
-			formats_imported.push_back("s3tc_bptc");
-			Image::CompressMode image_compress_mode;
-			String image_compress_format;
-			if (high_quality || is_hdr) {
-				image_compress_mode = Image::COMPRESS_BPTC;
-				image_compress_format = "bptc";
-			} else {
-				image_compress_mode = Image::COMPRESS_S3TC;
-				image_compress_format = "s3tc";
+		const bool can_s3tc_bptc = ResourceImporterTextureSettings::should_import_s3tc_bptc();
+		const bool can_etc2_astc = ResourceImporterTextureSettings::should_import_etc2_astc();
+		ERR_FAIL_COND_V_MSG(!can_s3tc_bptc && !can_etc2_astc, FAILED, "No supported compression formats are enabled in the project settings for streamed textures.");
+
+		// HDR handling.
+		const bool is_hdr = (image->get_format() >= Image::FORMAT_RF && image->get_format() <= Image::FORMAT_RGBE9995);
+		bool can_compress_hdr = hdr_compression > 0;
+		bool force_uncompressed = false;
+
+		if (is_hdr) {
+			bool has_alpha = image->detect_alpha() != Image::ALPHA_NONE;
+			if (has_alpha) {
+				// HDR with alpha is not compressible to BC6H/ASTC-HDR.
+				if (hdr_compression == 2) {
+					// User selected "Always", so force an alpha-less format.
+					if (image->get_format() == Image::FORMAT_RGBAF) {
+						image->convert(Image::FORMAT_RGBF);
+					} else if (image->get_format() == Image::FORMAT_RGBAH) {
+						image->convert(Image::FORMAT_RGBH);
+					}
+				} else {
+					can_compress_hdr = false;
+				}
 			}
-			Ref<Image> image_s3tc_bptc = image->duplicate();
-			image_s3tc_bptc->compress_from_channels(image_compress_mode, used_channels);
-			Error err_s3tc = StreamedTexture2D::_save_data(p_save_path + "." + image_compress_format + ".stex", image_s3tc_bptc, save_flags, streaming_min, streaming_max);
-			ERR_FAIL_COND_V_MSG(err_s3tc != OK, err_s3tc, "Failed to save S3TC/BPTC streamed texture.");
-			if (err_s3tc == OK) {
-				r_platform_variants->push_back(image_compress_format);
+
+			// Fall back to RGBE9995 uncompressed if HDR compression is disabled.
+			if (!can_compress_hdr && image->get_format() != Image::FORMAT_RGBE9995) {
+				image->convert(Image::FORMAT_RGBE9995);
+				force_uncompressed = true;
 			}
 		}
 
-		if (can_etc2_astc) {
-			formats_imported.push_back("etc2_astc");
-			Image::CompressMode image_compress_mode;
-			String image_compress_format;
-			if (high_quality || is_hdr) {
-				image_compress_mode = Image::COMPRESS_ASTC;
-				image_compress_format = "astc";
-			} else {
-				image_compress_mode = Image::COMPRESS_ETC2;
-				image_compress_format = "etc2";
+		if (force_uncompressed) {
+			// Save uncompressed (no platform variants needed).
+			Error err_unc = StreamedTexture2D::_save_data(p_save_path + ".stex", image, save_flags, streaming_min, streaming_max);
+			ERR_FAIL_COND_V_MSG(err_unc != OK, err_unc, "Failed to save uncompressed HDR streamed texture.");
+		} else {
+			if (can_s3tc_bptc) {
+				formats_imported.push_back("s3tc_bptc");
+				Image::CompressMode image_compress_mode;
+				String image_compress_format;
+				if (high_quality || is_hdr) {
+					image_compress_mode = Image::COMPRESS_BPTC;
+					image_compress_format = "bptc";
+				} else {
+					image_compress_mode = Image::COMPRESS_S3TC;
+					image_compress_format = "s3tc";
+				}
+				Ref<Image> image_s3tc_bptc = image->duplicate();
+				image_s3tc_bptc->compress_from_channels(image_compress_mode, used_channels);
+				Error err_s3tc = StreamedTexture2D::_save_data(p_save_path + "." + image_compress_format + ".stex", image_s3tc_bptc, save_flags, streaming_min, streaming_max);
+				ERR_FAIL_COND_V_MSG(err_s3tc != OK, err_s3tc, "Failed to save S3TC/BPTC streamed texture.");
+				if (err_s3tc == OK) {
+					r_platform_variants->push_back(image_compress_format);
+				}
 			}
-			Ref<Image> image_etc2_astc = image->duplicate();
-			image_etc2_astc->compress_from_channels(image_compress_mode, used_channels);
-			Error err_etc2 = StreamedTexture2D::_save_data(p_save_path + "." + image_compress_format + ".stex", image_etc2_astc, save_flags, streaming_min, streaming_max);
-			ERR_FAIL_COND_V_MSG(err_etc2 != OK, err_etc2, "Failed to save ETC2/ASTC streamed texture.");
-			if (err_etc2 == OK) {
-				r_platform_variants->push_back(image_compress_format);
+
+			if (can_etc2_astc) {
+				formats_imported.push_back("etc2_astc");
+				Image::CompressMode image_compress_mode;
+				String image_compress_format;
+				if (high_quality || is_hdr) {
+					image_compress_mode = Image::COMPRESS_ASTC;
+					image_compress_format = "astc";
+				} else {
+					image_compress_mode = Image::COMPRESS_ETC2;
+					image_compress_format = "etc2";
+				}
+				Ref<Image> image_etc2_astc = image->duplicate();
+				image_etc2_astc->compress_from_channels(image_compress_mode, used_channels);
+				Error err_etc2 = StreamedTexture2D::_save_data(p_save_path + "." + image_compress_format + ".stex", image_etc2_astc, save_flags, streaming_min, streaming_max);
+				ERR_FAIL_COND_V_MSG(err_etc2 != OK, err_etc2, "Failed to save ETC2/ASTC streamed texture.");
+				if (err_etc2 == OK) {
+					r_platform_variants->push_back(image_compress_format);
+				}
 			}
 		}
 	}

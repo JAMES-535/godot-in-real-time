@@ -37,7 +37,7 @@
 #include "core/object/class_db.h"
 #include "scene/resources/texture.h"
 
-static Ref<ResourceImporterDds> resource_importer_dds;
+static Ref<ResourceImporterDDS> resource_importer_dds;
 static Ref<ResourceLoaderDDS> resource_loader_dds;
 
 void initialize_dds_module(ModuleInitializationLevel p_level) {
