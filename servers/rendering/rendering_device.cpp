@@ -29,7 +29,6 @@
 /**************************************************************************/
 
 #include "rendering_device.h"
-#include "core/object/class_db.h"
 #include "rendering_device.compat.inc"
 
 #include "core/config/engine.h"
