@@ -1571,9 +1571,10 @@ void fragment_shader(in SceneData scene_data) {
 		item_from = subgroupBroadcastFirst(subgroupMin(item_from));
 		item_to = subgroupBroadcastFirst(subgroupMax(item_to));
 
-		for (uint i = item_from; i < item_to; i++) {
-			uint mask = cluster_buffer.data[cluster_decal_offset + i];
-			mask &= cluster_get_range_clip_mask(i, item_min, item_max);
+		for (uint i = item_to; i > item_from; i--) {
+			uint word = i - 1u;
+			uint mask = cluster_buffer.data[cluster_decal_offset + word];
+			mask &= cluster_get_range_clip_mask(word, item_min, item_max);
 
 			uint merged_mask = subgroupBroadcastFirst(subgroupOr(mask));
 			while (merged_mask != 0) {
@@ -1584,7 +1585,7 @@ void fragment_shader(in SceneData scene_data) {
 					continue;
 				}
 
-				uint decal_index = 32 * i + bit;
+				uint decal_index = 32 * word + bit;
 
 				if (!bool(decals.data[decal_index].mask & instances.data[instance_index].layer_mask)) {
 					continue; //not masked
