@@ -847,7 +847,14 @@ LightmapGI::BakeError LightmapGI::_save_and_reimport_atlas_textures(const Ref<Li
 	const int slice_width = images[0]->get_width();
 	const int slice_height = images[0]->get_height();
 
-	const int slices_per_texture = Image::MAX_HEIGHT / slice_height;
+	int slices_per_texture = MIN((int64_t)Image::MAX_HEIGHT / slice_height, (int64_t)Image::MAX_PIXELS / ((int64_t)slice_width * (int64_t)slice_height));
+	ERR_FAIL_COND_V(slices_per_texture < 1, LightmapGI::BAKE_ERROR_CANT_CREATE_IMAGE);
+
+	if (!p_is_shadowmask && directional && slices_per_texture >= 4) 
+	{
+		slices_per_texture -= slices_per_texture % 4;
+	}
+
 	const int texture_count = Math::ceil(slice_count / (float)slices_per_texture);
 	const int last_count = slice_count % slices_per_texture;
 
