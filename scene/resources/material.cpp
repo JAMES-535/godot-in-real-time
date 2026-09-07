@@ -38,6 +38,7 @@
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/version.h"
+#include "modules/modules_enabled.gen.h"
 #include "scene/main/scene_tree.h"
 #include "scene/resources/texture.h"
 #include "servers/rendering/rendering_server.h"
