@@ -1475,41 +1475,109 @@ vec4 triplanar_texture(sampler2D p_sampler, vec3 p_weights, vec3 p_triplanar_pos
 )";
 	}
 
+	if (features[FEATURE_HEIGHT_MAPPING] && flags[FLAG_UV1_USE_TRIPLANAR] && deep_parallax) {
+		code += R"(
+vec4 triplanar_texture_grad(sampler2D p_sampler, vec3 p_weights, vec3 p_triplanar_pos, vec3 p_dx, vec3 p_dy) {
+	vec4 samp = vec4(0.0);
+	samp += textureGrad(p_sampler, p_triplanar_pos.xy, p_dx.xy, p_dy.xy) * p_weights.z;
+	samp += textureGrad(p_sampler, p_triplanar_pos.xz, p_dx.xz, p_dy.xz) * p_weights.y;
+	samp += textureGrad(p_sampler, p_triplanar_pos.zy * vec2(-1.0, 1.0), p_dx.zy * vec2(-1.0, 1.0), p_dy.zy * vec2(-1.0, 1.0)) * p_weights.x;
+	return samp;
+}
+)";
+	}
+
 	// Generate fragment shader.
 	code += R"(
 void fragment() {)";
 
-	if (!flags[FLAG_UV1_USE_TRIPLANAR]) {
+	if (flags[FLAG_UV1_USE_TRIPLANAR]) {
+		code += R"(
+	vec3 base_triplanar_pos = uv1_triplanar_pos;
+)";
+	} else {
 		code += R"(
 	vec2 base_uv = UV;
 )";
 	}
 
 	if ((features[FEATURE_DETAIL] && detail_uv == DETAIL_UV_2) || (features[FEATURE_AMBIENT_OCCLUSION] && flags[FLAG_AO_ON_UV2]) || (features[FEATURE_EMISSION] && flags[FLAG_EMISSION_ON_UV2])) {
-		// Don't add a newline if the UV assignment above is already performed,
-		// so that UV1 and UV2 are closer to each other.
-		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "\n";
-		}
 		code += R"(	vec2 base_uv2 = UV2;
 )";
 	}
 
 	if (features[FEATURE_HEIGHT_MAPPING] && flags[FLAG_UV1_USE_TRIPLANAR]) {
-		// Display both resource name and albedo texture name.
-		// Materials are often built-in to scenes, so displaying the resource name alone may not be meaningful.
-		// On the other hand, albedo textures are almost always external to the scene.
-		if (textures[TEXTURE_ALBEDO].is_valid()) {
-			WARN_PRINT(vformat("%s (albedo %s): Height mapping is not supported on triplanar materials. Ignoring height mapping in favor of triplanar mapping.", get_path(), textures[TEXTURE_ALBEDO]->get_path()));
-		} else if (!get_path().is_empty()) {
-			WARN_PRINT(vformat("%s: Height mapping is not supported on triplanar materials. Ignoring height mapping in favor of triplanar mapping.", get_path()));
+		code += R"(
+	{
+		// Height: Enabled (Triplanar)
+		vec3 view_dir_vs = normalize(-VERTEX + EYE_OFFSET);
+)";
+		if (flags[FLAG_UV1_USE_WORLD_TRIPLANAR]) {
+			code += R"(		// View direction in world space, with the Y flip applied by the triplanar sampling position.
+		vec3 view_dir = normalize(mat3(INV_VIEW_MATRIX) * view_dir_vs) * vec3(1.0, -1.0, 1.0);
+)";
 		} else {
-			// Resource wasn't saved yet.
-			WARN_PRINT("Height mapping is not supported on triplanar materials. Ignoring height mapping in favor of triplanar mapping.");
+			code += R"(		// View direction in object space, with the Y flip applied by the triplanar sampling position.
+		vec3 view_dir = normalize((mat3(INV_VIEW_MATRIX) * view_dir_vs) * MODEL_NORMAL_MATRIX) * vec3(1.0, -1.0, 1.0);
+)";
 		}
+
+		if (deep_parallax) {
+			code += R"(
+		// Height Deep Parallax: Enabled
+		vec3 pos_dx = dFdx(base_triplanar_pos);
+		vec3 pos_dy = dFdy(base_triplanar_pos);
+		float num_layers = mix(float(heightmap_max_layers), float(heightmap_min_layers), abs(dot(NORMAL, view_dir_vs)));
+		float layer_depth = 1.0 / num_layers;
+		vec3 p = view_dir * heightmap_scale * 0.01;
+		vec3 delta = p / num_layers;
+		vec3 ofs = base_triplanar_pos;
+)";
+			if (flags[FLAG_INVERT_HEIGHTMAP]) {
+				code += "		float depth = triplanar_texture_grad(texture_heightmap, uv1_power_normal, ofs, pos_dx, pos_dy).r;\n";
+			} else {
+				code += "		float depth = 1.0 - triplanar_texture_grad(texture_heightmap, uv1_power_normal, ofs, pos_dx, pos_dy).r;\n";
+			}
+			code += R"(
+		float current_depth = 0.0;
+		for (int i = 0; i <= heightmap_max_layers && current_depth < depth; i++) {
+			ofs -= delta;
+)";
+			if (flags[FLAG_INVERT_HEIGHTMAP]) {
+				code += "			depth = triplanar_texture_grad(texture_heightmap, uv1_power_normal, ofs, pos_dx, pos_dy).r;\n";
+			} else {
+				code += "			depth = 1.0 - triplanar_texture_grad(texture_heightmap, uv1_power_normal, ofs, pos_dx, pos_dy).r;\n";
+			}
+			code += R"(
+			current_depth += layer_depth;
+		}
+
+		vec3 prev_ofs = ofs + delta;
+		float after_depth = depth - current_depth;
+)";
+			if (flags[FLAG_INVERT_HEIGHTMAP]) {
+				code += "		float before_depth = triplanar_texture_grad(texture_heightmap, uv1_power_normal, prev_ofs, pos_dx, pos_dy).r - current_depth + layer_depth;\n";
+			} else {
+				code += "		float before_depth = (1.0 - triplanar_texture_grad(texture_heightmap, uv1_power_normal, prev_ofs, pos_dx, pos_dy).r) - current_depth + layer_depth;\n";
+			}
+			code += R"(
+		float weight = after_depth / (after_depth - before_depth);
+		ofs = mix(ofs, prev_ofs, weight);
+)";
+		} else {
+			if (flags[FLAG_INVERT_HEIGHTMAP]) {
+				code += "		float depth = triplanar_texture(texture_heightmap, uv1_power_normal, base_triplanar_pos).r;\n";
+			} else {
+				code += "		float depth = 1.0 - triplanar_texture(texture_heightmap, uv1_power_normal, base_triplanar_pos).r;\n";
+			}
+
+			code += "		vec3 ofs = base_triplanar_pos - view_dir * depth * heightmap_scale * 0.01;\n";
+		}
+
+		code += "		base_triplanar_pos = ofs;\n";
+		code += "	}\n";
 	}
 
-	// Heightmapping isn't supported at the same time as triplanar mapping.
 	if (features[FEATURE_HEIGHT_MAPPING] && !flags[FLAG_UV1_USE_TRIPLANAR]) {
 		// Binormal is negative due to mikktspace. Flipping it "unflips" it.
 		code += R"(
@@ -1589,7 +1657,7 @@ void fragment() {)";
 	} else {
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
 			code += R"(
-	vec4 albedo_tex = triplanar_texture(texture_albedo, uv1_power_normal, uv1_triplanar_pos);
+	vec4 albedo_tex = triplanar_texture(texture_albedo, uv1_power_normal, base_triplanar_pos);
 )";
 		} else {
 			code += R"(
@@ -1650,7 +1718,7 @@ void fragment() {)";
 	if (!orm) {
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
 			code += R"(
-	float metallic_tex = dot(triplanar_texture(texture_metallic, uv1_power_normal, uv1_triplanar_pos), metallic_texture_channel);
+	float metallic_tex = dot(triplanar_texture(texture_metallic, uv1_power_normal, base_triplanar_pos), metallic_texture_channel);
 )";
 		} else {
 			code += R"(
@@ -1692,7 +1760,7 @@ void fragment() {)";
 		}
 
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	float roughness_tex = dot(triplanar_texture(texture_roughness, uv1_power_normal, uv1_triplanar_pos), roughness_texture_channel);\n";
+			code += "	float roughness_tex = dot(triplanar_texture(texture_roughness, uv1_power_normal, base_triplanar_pos), roughness_texture_channel);\n";
 		} else {
 			code += "	float roughness_tex = dot(texture(texture_roughness, base_uv), roughness_texture_channel);\n";
 		}
@@ -1701,7 +1769,7 @@ void fragment() {)";
 	} else {
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
 			code += R"(
-	vec4 orm_tex = triplanar_texture(texture_orm, uv1_power_normal, uv1_triplanar_pos);
+	vec4 orm_tex = triplanar_texture(texture_orm, uv1_power_normal, base_triplanar_pos);
 )";
 		} else {
 			code += R"(
@@ -1719,7 +1787,7 @@ void fragment() {)";
 	// Normal Map: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	NORMAL_MAP = triplanar_texture(texture_normal, uv1_power_normal, uv1_triplanar_pos).rgb;\n";
+			code += "	NORMAL_MAP = triplanar_texture(texture_normal, uv1_power_normal, base_triplanar_pos).rgb;\n";
 		} else {
 			code += "	NORMAL_MAP = texture(texture_normal, base_uv).rgb;\n";
 		}
@@ -1731,7 +1799,7 @@ void fragment() {)";
 	// Bent Normal Map: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	BENT_NORMAL_MAP = triplanar_texture(texture_bent_normal, uv1_power_normal, uv1_triplanar_pos).rgb;\n";
+			code += "	BENT_NORMAL_MAP = triplanar_texture(texture_bent_normal, uv1_power_normal, base_triplanar_pos).rgb;\n";
 		} else {
 			code += "	BENT_NORMAL_MAP = texture(texture_bent_normal, base_uv).rgb;\n";
 		}
@@ -1749,7 +1817,7 @@ void fragment() {)";
 			}
 		} else {
 			if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-				code += "	vec3 emission_tex = triplanar_texture(texture_emission, uv1_power_normal, uv1_triplanar_pos).rgb;\n";
+				code += "	vec3 emission_tex = triplanar_texture(texture_emission, uv1_power_normal, base_triplanar_pos).rgb;\n";
 			} else {
 				code += "	vec3 emission_tex = texture(texture_emission, base_uv).rgb;\n";
 			}
@@ -1785,7 +1853,7 @@ void fragment() {)";
 )";
 		}
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec2 ref_ofs = SCREEN_UV - ref_normal.xy * dot(triplanar_texture(texture_refraction, uv1_power_normal, uv1_triplanar_pos), refraction_texture_channel) * refraction;\n";
+			code += "	vec2 ref_ofs = SCREEN_UV - ref_normal.xy * dot(triplanar_texture(texture_refraction, uv1_power_normal, base_triplanar_pos), refraction_texture_channel) * refraction;\n";
 		} else {
 			code += "	vec2 ref_ofs = SCREEN_UV - ref_normal.xy * dot(texture(texture_refraction, base_uv), refraction_texture_channel) * refraction;\n";
 		}
@@ -1869,7 +1937,7 @@ void fragment() {)";
 	// Rim: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec2 rim_tex = triplanar_texture(texture_rim, uv1_power_normal, uv1_triplanar_pos).xy;\n";
+			code += "	vec2 rim_tex = triplanar_texture(texture_rim, uv1_power_normal, base_triplanar_pos).xy;\n";
 		} else {
 			code += "	vec2 rim_tex = texture(texture_rim, base_uv).xy;\n";
 		}
@@ -1883,7 +1951,7 @@ void fragment() {)";
 	// Clearcoat: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec2 clearcoat_tex = triplanar_texture(texture_clearcoat, uv1_power_normal, uv1_triplanar_pos).xy;\n";
+			code += "	vec2 clearcoat_tex = triplanar_texture(texture_clearcoat, uv1_power_normal, base_triplanar_pos).xy;\n";
 		} else {
 			code += "	vec2 clearcoat_tex = texture(texture_clearcoat, base_uv).xy;\n";
 		}
@@ -1897,7 +1965,7 @@ void fragment() {)";
 	// Anisotropy: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec3 anisotropy_tex = triplanar_texture(texture_flowmap, uv1_power_normal, uv1_triplanar_pos).rga;\n";
+			code += "	vec3 anisotropy_tex = triplanar_texture(texture_flowmap, uv1_power_normal, base_triplanar_pos).rga;\n";
 		} else {
 			code += "	vec3 anisotropy_tex = texture(texture_flowmap, base_uv).rga;\n";
 		}
@@ -1919,7 +1987,7 @@ void fragment() {)";
 				}
 			} else {
 				if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-					code += "	AO = dot(triplanar_texture(texture_ambient_occlusion, uv1_power_normal, uv1_triplanar_pos), ao_texture_channel);\n";
+					code += "	AO = dot(triplanar_texture(texture_ambient_occlusion, uv1_power_normal, base_triplanar_pos), ao_texture_channel);\n";
 				} else {
 					code += "	AO = dot(texture(texture_ambient_occlusion, base_uv), ao_texture_channel);\n";
 				}
@@ -1936,7 +2004,7 @@ void fragment() {)";
 	// Subsurface Scattering: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	float sss_tex = triplanar_texture(texture_subsurface_scattering, uv1_power_normal, uv1_triplanar_pos).r;\n";
+			code += "	float sss_tex = triplanar_texture(texture_subsurface_scattering, uv1_power_normal, base_triplanar_pos).r;\n";
 		} else {
 			code += "	float sss_tex = texture(texture_subsurface_scattering, base_uv).r;\n";
 		}
@@ -1948,7 +2016,7 @@ void fragment() {)";
 	// Subsurface Scattering Transmittance: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec4 trans_color_tex = triplanar_texture(texture_subsurface_transmittance, uv1_power_normal, uv1_triplanar_pos);\n";
+			code += "	vec4 trans_color_tex = triplanar_texture(texture_subsurface_transmittance, uv1_power_normal, base_triplanar_pos);\n";
 		} else {
 			code += "	vec4 trans_color_tex = texture(texture_subsurface_transmittance, base_uv);\n";
 		}
@@ -1964,7 +2032,7 @@ void fragment() {)";
 	// Backlight: Enabled
 )";
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec3 backlight_tex = triplanar_texture(texture_backlight, uv1_power_normal, uv1_triplanar_pos).rgb;\n";
+			code += "	vec3 backlight_tex = triplanar_texture(texture_backlight, uv1_power_normal, base_triplanar_pos).rgb;\n";
 		} else {
 			code += "	vec3 backlight_tex = texture(texture_backlight, base_uv).rgb;\n";
 		}
@@ -1977,11 +2045,12 @@ void fragment() {)";
 )";
 		const bool triplanar = (flags[FLAG_UV1_USE_TRIPLANAR] && detail_uv == DETAIL_UV_1) || (flags[FLAG_UV2_USE_TRIPLANAR] && detail_uv == DETAIL_UV_2);
 		if (triplanar) {
-			const String tp_uv = detail_uv == DETAIL_UV_1 ? "uv1" : "uv2";
-			code += vformat(R"(	vec4 detail_tex = triplanar_texture(texture_detail_albedo, %s_power_normal, %s_triplanar_pos);
-	vec4 detail_norm_tex = triplanar_texture(texture_detail_normal, %s_power_normal, %s_triplanar_pos);
+			const String tp_normal = detail_uv == DETAIL_UV_1 ? "uv1_power_normal" : "uv2_power_normal";
+			const String tp_pos = detail_uv == DETAIL_UV_1 ? "base_triplanar_pos" : "uv2_triplanar_pos";
+			code += vformat(R"(	vec4 detail_tex = triplanar_texture(texture_detail_albedo, %s, %s);
+	vec4 detail_norm_tex = triplanar_texture(texture_detail_normal, %s, %s);
 )",
-					tp_uv, tp_uv, tp_uv, tp_uv);
+					tp_normal, tp_pos, tp_normal, tp_pos);
 		} else {
 			const String det_uv = detail_uv == DETAIL_UV_1 ? "base_uv" : "base_uv2";
 			code += vformat(R"(	vec4 detail_tex = texture(texture_detail_albedo, %s);
@@ -1991,7 +2060,7 @@ void fragment() {)";
 		}
 
 		if (flags[FLAG_UV1_USE_TRIPLANAR]) {
-			code += "	vec4 detail_mask_tex = triplanar_texture(texture_detail_mask, uv1_power_normal, uv1_triplanar_pos);\n";
+			code += "	vec4 detail_mask_tex = triplanar_texture(texture_detail_mask, uv1_power_normal, base_triplanar_pos);\n";
 		} else {
 			code += "	vec4 detail_mask_tex = texture(texture_detail_mask, base_uv);\n";
 		}
@@ -2045,11 +2114,11 @@ void fragment() {)";
 	// Write triplanar UV to UV for texture streaming feedback.
 	// Pick the UV projection of the dominant triplanar axis.
 	if (uv1_power_normal.x >= uv1_power_normal.y && uv1_power_normal.x >= uv1_power_normal.z) {
-		STREAMING_UV = uv1_triplanar_pos.zy * vec2(-1.0, 1.0);
+		STREAMING_UV = base_triplanar_pos.zy * vec2(-1.0, 1.0);
 	} else if (uv1_power_normal.y >= uv1_power_normal.z) {
-		STREAMING_UV = uv1_triplanar_pos.xz;
+		STREAMING_UV = base_triplanar_pos.xz;
 	} else {
-		STREAMING_UV = uv1_triplanar_pos.xy;
+		STREAMING_UV = base_triplanar_pos.xy;
 	}
 )";
 	}
@@ -2668,6 +2737,10 @@ void BaseMaterial3D::_validate_property(PropertyInfo &p_property) const {
 		}
 
 		if (p_property.name == "stencil_outline_thickness" && stencil_mode != STENCIL_MODE_OUTLINE) {
+			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+		}
+
+		if ((p_property.name == "heightmap_flip_tangent" || p_property.name == "heightmap_flip_binormal") && flags[FLAG_UV1_USE_TRIPLANAR]) {
 			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
 		}
 	}
