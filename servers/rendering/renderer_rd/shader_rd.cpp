@@ -259,6 +259,7 @@ void ShaderRD::_initialize_version(Version *p_version) {
 	p_version->variant_data.resize(variant_defines.size());
 	p_version->group_compilation_tasks.resize_initialized(group_enabled.size());
 	p_version->group_loaded_from_cache.resize_initialized(group_enabled.size());
+	p_version->group_compiled.resize_initialized(group_enabled.size());
 }
 
 void ShaderRD::_clear_version(Version *p_version) {
@@ -715,6 +716,7 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 		return;
 	}
 
+	p_version->group_compiled.write[p_group] = true;
 	p_version->dirty = false;
 
 #if ENABLE_SHADER_CACHE
@@ -940,6 +942,10 @@ void ShaderRD::enable_group(int p_group) {
 	for (const RID &version_rid : version_owner.get_owned_list()) {
 		Version *version = version_owner.get_or_null(version_rid);
 		version->mutex->lock();
+		if (version->variants.is_empty() || version->group_compiled.size() <= p_group || version->group_compiled[p_group]) {
+			version->mutex->unlock();
+			continue;
+		}
 		_compile_version_start(version, p_group);
 		version->mutex->unlock();
 	}

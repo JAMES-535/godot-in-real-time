@@ -83,6 +83,7 @@ private:
 		Vector<CharString> custom_defines;
 		Vector<WorkerThreadPool::GroupID> group_compilation_tasks;
 		Vector<bool> group_loaded_from_cache;
+		Vector<bool> group_compiled;
 
 		Vector<Vector<uint8_t>> variant_data;
 		Vector<RID> variants;
