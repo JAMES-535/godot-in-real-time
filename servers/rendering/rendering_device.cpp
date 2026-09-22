@@ -4221,6 +4221,15 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 	Shader *shader = shader_owner.get_or_null(id);
 	ERR_FAIL_NULL_V(shader, RID());
 
+	if (shader->driver_id) {
+		// RID was already filled once. Dispose of the previous driver shader
+		// and reset derived state instead of accumulating on top of it.
+		WARN_PRINT(vformat("Shader '%s' re-created into an already-initialized RID.", shader->name));
+		frames[frame].shaders_to_dispose_of.push_back(*shader);
+	}
+	shader->set_formats.clear();
+	shader->stage_bits = {};
+
 	*((ShaderReflection *)shader) = shader_container->get_shader_reflection();
 	shader->name.clear();
 	shader->name.append_utf8(shader_container->shader_name);
@@ -5786,6 +5795,7 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 		for (uint32_t i = pcount; i < draw_list.state.set_count; i++) {
 			// Unbind the ones above (not used) if exist.
 			draw_list.state.sets[i].bound = false;
+			draw_list.state.sets[i].pipeline_expected_format = 0;
 		}
 
 		draw_list.state.set_count = pcount; // Update set count.
@@ -6064,7 +6074,16 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 
 		if (draw_list.state.sets[i].pipeline_expected_format != draw_list.state.sets[i].uniform_set_format) {
 			if (draw_list.state.sets[i].uniform_set_format == 0) {
-				ERR_FAIL_MSG(vformat("Uniforms were never supplied for set (%d) at the time of drawing, which are required by the pipeline.", i));
+				Shader *sh = shader_owner.get_or_null(draw_list.state.pipeline_shader);
+				String layout;
+				if (sh) {
+					for (int s = 0; s < sh->uniform_sets.size(); s++) {
+						for (int u = 0; u < sh->uniform_sets[s].size(); u++) {
+							layout += vformat("\n  set %d binding %d type %d", s, sh->uniform_sets[s][u].binding, (int)sh->uniform_sets[s][u].type);
+						}
+					}
+				}
+				ERR_FAIL_MSG(vformat("Uniforms were never supplied for set (%d) ... (shader: %s, set_count %d)%s", i, sh ? sh->name : String("?"), draw_list.state.set_count, layout));
 			} else if (uniform_set_owner.owns(draw_list.state.sets[i].uniform_set)) {
 				UniformSet *us = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
 				const String us_info = us ? vformat("(%d):\n%s\n", i, _shader_uniform_debug(us->shader_id, us->shader_set)) : vformat("(%d, which was just freed) ", i);
