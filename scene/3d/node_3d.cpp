@@ -1421,6 +1421,14 @@ bool Node3D::_property_get_revert(const StringName &p_name, Variant &r_property)
 	return true;
 }
 
+void Node3D::set_lightmap_occluder_only(bool p_enabled) {
+	lightmap_occluder_only = p_enabled;
+}
+
+bool Node3D::is_lightmap_occluder_only() const {
+	return lightmap_occluder_only;
+}
+
 void Node3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_transform", "local"), &Node3D::set_transform);
 	ClassDB::bind_method(D_METHOD("get_transform"), &Node3D::get_transform);
@@ -1537,6 +1545,12 @@ void Node3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "visibility_parent", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "GeometryInstance3D"), "set_visibility_parent", "get_visibility_parent");
 
 	ADD_SIGNAL(MethodInfo("visibility_changed"));
+
+	ClassDB::bind_method(D_METHOD("set_lightmap_occluder_only", "enabled"), &Node3D::set_lightmap_occluder_only);
+	ClassDB::bind_method(D_METHOD("is_lightmap_occluder_only"), &Node3D::is_lightmap_occluder_only);
+
+	ADD_GROUP("Lightmap", "lightmap_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lightmap_occluder_only"), "set_lightmap_occluder_only", "is_lightmap_occluder_only");
 }
 
 Node3D::Node3D() :

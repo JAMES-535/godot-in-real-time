@@ -396,8 +396,11 @@ LightmapGIData::~LightmapGIData() {
 
 ///////////////////////////
 
-void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes) {
-	MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_at_node);
+void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes, bool p_occluder_only) {
+	Node3D *n3d = Object::cast_to<Node3D>(p_at_node);
+    const bool occluder_only = p_occluder_only || (n3d && n3d->is_lightmap_occluder_only());
+
+    MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_at_node);
 	if (mi && mi->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && mi->is_visible_in_tree()) {
 		Ref<Mesh> mesh = mi->get_mesh();
 		if (mesh.is_valid()) {
@@ -427,6 +430,11 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 				mf.subindex = -1;
 				mf.mesh = mesh;
 				mf.lightmap_scale = mi->get_lightmap_texel_scale();
+				mf.occluder_only = occluder_only;
+				
+				if (occluder_only) {
+					mf.lightmap_scale = MIN(mf.lightmap_scale, 0.125f);
+				}
 
 				Ref<Material> all_override = mi->get_material_override();
 				for (int i = 0; i < mesh->get_surface_count(); i++) {
@@ -461,6 +469,10 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 				mf.node_path = get_path_to(s);
 				mf.subindex = i / 2;
 				mf.lightmap_scale = 1.0;
+				mf.occluder_only = occluder_only;
+				if (occluder_only) {
+					mf.lightmap_scale = 0.125f;
+				}
 				mf.mesh = mesh;
 
 				meshes.push_back(mf);
@@ -490,7 +502,7 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 			continue; //maybe a helper
 		}
 
-		_find_meshes_and_lights(child, meshes, lights, probes);
+		_find_meshes_and_lights(child, meshes, lights, probes, occluder_only);
 	}
 }
 
@@ -1145,6 +1157,9 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 				if (mf.subindex >= 0) {
 					d["subindex"] = mf.subindex;
 				}
+				if (mf.occluder_only) {
+					d["occluder_only"] = true;
+				}
 				md.userdata = d;
 			}
 
@@ -1537,7 +1552,11 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 
 	for (int i = 0; i < lightmapper->get_bake_mesh_count(); i++) {
 		Dictionary d = lightmapper->get_bake_mesh_userdata(i);
+		if (d.has("occluder_only")) {
+			continue;
+		}
 		NodePath np = d["path"];
+
 		int32_t subindex = -1;
 		if (d.has("subindex")) {
 			subindex = d["subindex"];

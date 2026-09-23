@@ -171,6 +171,8 @@ private:
 
 	} data;
 
+	bool lightmap_occluder_only = false;
+
 	NodePath visibility_parent_path;
 
 	_FORCE_INLINE_ uint32_t _read_dirty_mask() const { return is_group_processing() ? data.dirty.mt.get() : data.dirty.st; }
@@ -290,6 +292,9 @@ public:
 	virtual bool is_transform_gizmo_visible() const { return data.transform_gizmo_visible; }
 #endif
 	virtual void reparent(RequiredParam<Node> p_parent, bool p_keep_global_transform = true) override;
+
+	void set_lightmap_occluder_only(bool p_enabled);
+    bool is_lightmap_occluder_only() const;
 
 	void set_disable_gizmos(bool p_enabled);
 	void update_gizmos();

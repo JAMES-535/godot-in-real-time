@@ -228,10 +228,11 @@ private:
 		int32_t subindex = 0;
 		Ref<Mesh> mesh;
 		float lightmap_scale = 0.0;
+		bool occluder_only = false;
 		Vector<Ref<Material>> overrides;
 	};
 
-	void _find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes);
+	void _find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes, bool p_occluder_only = false);
 
 	void _assign_lightmaps();
 	void _clear_lightmaps();

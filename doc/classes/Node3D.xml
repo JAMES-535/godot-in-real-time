@@ -290,6 +290,9 @@
 		</method>
 	</methods>
 	<members>
+		<member name="lightmap_occluder_only" type="bool" setter="set_lightmap_occluder_only" getter="is_lightmap_occluder_only" default="false">
+			If [code]true[/code], this node and all of its descendants contribute shadows and bounced light to [LightmapGI] bakes but do not receive a lightmap and are not registered as lightmap users. Useful for baking a zone with neighbouring geometry loaded that will be lit by its own lightmap at runtime.
+		</member>
 		<member name="basis" type="Basis" setter="set_basis" getter="get_basis">
 			Basis of the [member transform] property. Represents the rotation, scale, and shear of this node in parent space (relative to the parent node).
 		</member>
