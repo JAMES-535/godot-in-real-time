@@ -31,12 +31,17 @@
 #include "texture_storage.h"
 
 #include "core/config/engine.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_globals.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+#include "modules/texture_streaming/texture_streaming.h"
+#endif
 
 using namespace RendererRD;
 
@@ -2073,7 +2078,15 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 	//delete last, so proxies can be updated
 	texture_owner.free(p_by_texture);
 
-	decal_atlas_mark_dirty_on_texture(p_texture);
+	if (decal_atlas.textures.has(p_texture)) {
+		const uint64_t now = OS::get_singleton()->get_ticks_msec();
+		if (!decal_atlas.streaming_dirty) {
+			decal_atlas.streaming_dirty_first_msec = now;
+		}
+
+		decal_atlas.streaming_dirty = true;
+		decal_atlas.streaming_dirty_msec = now;
+	}
 	area_light_atlas_mark_dirty_on_texture(p_texture);
 }
 
@@ -3878,12 +3891,21 @@ Dependency *TextureStorage::decal_get_dependency(RID p_decal) {
 void TextureStorage::update_decal_atlas() {
 	CopyEffects *copy_effects = CopyEffects::get_singleton();
 	ERR_FAIL_NULL(copy_effects);
-
+	
 	if (!decal_atlas.dirty) {
-		return; //nothing to do
+		if (!decal_atlas.streaming_dirty) {
+			return; // Nothing to do.
+		}
+		const uint64_t now = OS::get_singleton()->get_ticks_msec();
+		const bool settled = now - decal_atlas.streaming_dirty_msec >= 300;
+		const bool waited_too_long = now - decal_atlas.streaming_dirty_first_msec >= 1500;
+		if (!settled && !waited_too_long) {
+			return;
+		}
 	}
 
 	decal_atlas.dirty = false;
+	decal_atlas.streaming_dirty = false;
 
 	if (decal_atlas.texture.is_valid()) {
 		RD::get_singleton()->free_rid(decal_atlas.texture);
@@ -4207,6 +4229,19 @@ void TextureStorage::update_decal_buffer(const PagedArray<RID> &p_decals, const 
 	for (uint32_t i = 0; i < decal_count; i++) {
 		DecalInstance *decal_instance = decal_sort[i].decal_instance;
 		Decal *decal = decal_sort[i].decal;
+
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+		// Decals bypass materials, so shader feedback never sees their textures.
+		// Request full res for every decal that survived culling and distance fade this frame.
+		if (TextureStreaming *ts = TextureStreaming::get_singleton()) {
+			for (int t = 0; t < RSE::DECAL_TEXTURE_MAX; t++) {
+				const Texture *tex = texture_owner.get_or_null(decal->textures[t]);
+				if (tex && tex->streaming_state.is_valid()) {
+					ts->texture_request_mip(tex->streaming_state, 0);
+				}
+			}
+		}
+#endif
 
 		if (using_forward_ids) {
 			forward_id_storage->map_forward_id(FORWARD_ID_TYPE_DECAL, decal_instance->forward_id, i, RSG::rasterizer->get_frame_number());

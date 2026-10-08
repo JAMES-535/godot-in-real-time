@@ -102,6 +102,12 @@ void StreamedTexture2D::texture_reload(uint8_t p_mip_level) {
 		return;
 	}
 
+	if (load_data.image->is_empty()) {
+		ERR_PRINT(vformat("Streamed texture %s produced an empty image at mip %d, keeping current mip.", path_to_file, new_mip));
+		_current_mip.store((uint8_t)current_mip);
+		return;
+	}
+
 	RID new_texture = RS::get_singleton()->texture_2d_create(load_data.image);
 	if (new_texture.is_null()) {
 		ERR_PRINT(vformat("Failed to create new texture for %s. Falling back to full reload.", path_to_file));
@@ -254,8 +260,8 @@ Error StreamedTexture2D::_load_data(const String &p_path, const uint8_t p_mip_le
 	ERR_FAIL_COND_V(err != OK, err);
 
 	// Calculate the dimensions at this mip level.
-	uint32_t mip_width = header.width >> load_mip;
-	uint32_t mip_height = header.height >> load_mip;
+	uint32_t mip_width = MAX(1u, header.width >> load_mip);
+	uint32_t mip_height = MAX(1u, header.height >> load_mip);
 
 	p_load_data.image->set_data(mip_width, mip_height, mip_count > 0, header.format, data);
 

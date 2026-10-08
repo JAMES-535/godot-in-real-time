@@ -164,6 +164,18 @@ void TextureStreaming::_texture_configure_streaming_impl(Completion<RID> *p_comp
 
 void TextureStreaming::texture_remove(RID p_rid) {
 	push_and_sync("_texture_remove_impl", this, &TextureStreaming::_texture_remove_impl, p_rid);
+
+	// Wait for reloads already queued or running on the I/O thread, so the caller
+	// can't free the texture while a reload is still using it.
+	if (texture_reload_thread.is_started() && Thread::get_caller_id() != texture_reload_thread.get_id()) {
+		CompletionVoid completion;
+		io_command_queue.push_internal("_io_barrier", this, &TextureStreaming::_io_barrier, &completion);
+		completion.wait();
+	}
+}
+
+void TextureStreaming::_io_barrier(CompletionVoid *p_completion) {
+	p_completion->complete();
 }
 
 void TextureStreaming::_texture_remove_impl(CompletionVoid *p_completion, RID p_rid) {
@@ -196,6 +208,25 @@ void TextureStreaming::_texture_update_impl(CompletionVoid *p_completion, RID p_
 		state->max_lod_override = uint8_t(CLAMP(p_max_lod, 0, 14));
 	}
 	p_completion->complete();
+}
+
+void TextureStreaming::texture_request_mip(RID p_state_rid, uint8_t p_mip) {
+	if (p_state_rid.is_null() || !feedback_buffer_thread.is_started()) {
+		return;
+	}
+	command_queue.push_internal("_texture_request_mip_impl", this, &TextureStreaming::_texture_request_mip_impl, p_state_rid, p_mip, OS::get_singleton()->get_ticks_msec());
+}
+
+void TextureStreaming::_texture_request_mip_impl(RID p_state_rid, uint8_t p_mip, uint64_t p_ticks_msec) {
+	StreamingState *state = streaming_info_owner.get_or_null(p_state_rid);
+	if (!state || state->removing.load(std::memory_order_relaxed)) {
+		return;
+	}
+	
+	if (p_mip < state->feedback_mip) {
+		state->feedback_mip = p_mip;
+		state->requested_tick_msec = p_ticks_msec;
+	}
 }
 
 RID TextureStreaming::material_set_textures(RID p_feedback_rid, const Vector<RID> &p_textures) {

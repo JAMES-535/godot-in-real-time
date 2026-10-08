@@ -593,6 +593,8 @@ private:
 	void _texture_configure_streaming_impl(Completion<RID> *p_completion, RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod, int p_max_lod, const Callable &p_reload_callable);
 	void _texture_update_impl(CompletionVoid *p_completion, RID p_rid, int p_width, int p_height, int p_min_lod, int p_max_lod);
 	void _texture_remove_impl(CompletionVoid *p_completion, RID p_rid);
+	void _texture_request_mip_impl(RID p_state_rid, uint8_t p_mip, uint64_t p_ticks_msec);
+	void _io_barrier(CompletionVoid *p_completion);
 
 	void _process_material_feedback_buffer(MaterialFeedbackBuffer *p_mb, uint64_t p_ticks_msec);
 
@@ -615,6 +617,9 @@ public:
 	// Feedback Buffer API
 	uint32_t feedback_buffer_material_index(RID p_material);
 	RID feedback_buffer_get_uniform_rid();
+
+	// For textures used outside materials, which shader feedback never sees.
+	void texture_request_mip(RID p_state_rid, uint8_t p_mip);
 
 	// Texture API - safe from any thread
 	RID texture_configure_streaming(RID p_texture, Image::Format p_format, int p_width, int p_height, int p_min_lod = 0, int p_max_lod = 0, Callable p_reload_callable = Callable());

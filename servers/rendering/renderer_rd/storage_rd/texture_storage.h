@@ -318,6 +318,9 @@ private:
 
 		HashMap<RID, Texture> textures;
 		bool dirty = true;
+		bool streaming_dirty = false;
+		uint64_t streaming_dirty_msec = 0;
+		uint64_t streaming_dirty_first_msec = 0;
 		int mipmaps = 5;
 
 		RID texture;
