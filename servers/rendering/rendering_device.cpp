@@ -8784,18 +8784,35 @@ Vector<uint8_t> RenderingDevice::_load_pipeline_cache() {
 }
 
 void RenderingDevice::update_pipeline_cache(bool p_closing) {
-	_THREAD_SAFE_METHOD_
+	if (p_closing) {
+		// Wait for an in flight save outside the mutex
+		WorkerThreadPool::TaskID pending = WorkerThreadPool::INVALID_TASK_ID;
+		{
+			MutexLock lock(pipeline_cache_mutex);
+			pending = pipeline_cache_save_task;
+		}
+		if (pending != WorkerThreadPool::INVALID_TASK_ID && !WorkerThreadPool::get_singleton()->is_task_completed(pending)) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(pending);
+		}
+		MutexLock lock(pipeline_cache_mutex);
+		pipeline_cache_save_task = WorkerThreadPool::INVALID_TASK_ID;
+		_update_pipeline_cache_locked(true);
+	} else {
+		// Called after every pipeline creation, from whichever thread compiled it. If a save is serializing the
+		// cache right now, don't wait for it
+		if (!pipeline_cache_mutex.try_lock()) {
+			return;
+		}
+		_update_pipeline_cache_locked(false);
+		pipeline_cache_mutex.unlock();
+	}
+}
 
-	{
+void RenderingDevice::_update_pipeline_cache_locked(bool p_closing) {
+	if (!p_closing) {
 		bool still_saving = pipeline_cache_save_task != WorkerThreadPool::INVALID_TASK_ID && !WorkerThreadPool::get_singleton()->is_task_completed(pipeline_cache_save_task);
 		if (still_saving) {
-			if (p_closing) {
-				WorkerThreadPool::get_singleton()->wait_for_task_completion(pipeline_cache_save_task);
-				pipeline_cache_save_task = WorkerThreadPool::INVALID_TASK_ID;
-			} else {
-				// We can't save until the currently running save is done. We'll retry next time; worst case, we'll save when exiting.
-				return;
-			}
+			// We can't save until the currently running save is done
 		}
 	}
 
@@ -8821,7 +8838,7 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 	}
 
 	if (p_closing) {
-		_save_pipeline_cache(this);
+		_save_pipeline_cache_locked(this);
 	} else {
 		pipeline_cache_save_task = WorkerThreadPool::get_singleton()->add_native_task(&_save_pipeline_cache, this, false, "PipelineCacheSave");
 	}
@@ -8829,10 +8846,16 @@ void RenderingDevice::update_pipeline_cache(bool p_closing) {
 
 void RenderingDevice::_save_pipeline_cache(void *p_data) {
 	RenderingDevice *self = static_cast<RenderingDevice *>(p_data);
+	MutexLock lock(self->pipeline_cache_mutex);
+	_save_pipeline_cache_locked(p_data);
+}
 
-	self->_thread_safe_.lock();
+void RenderingDevice::_save_pipeline_cache_locked(void *p_data) {
+	RenderingDevice *self = static_cast<RenderingDevice *>(p_data);
+
+	// Caller holds pipeline_cache_mutex. The device-wide mutex is deliberately not taken: vkGetPipelineCacheData
+	// on a cache of tens of MB takes a long time and used to stall the render thread on every chunked save.
 	Vector<uint8_t> cache_blob = self->driver->pipeline_cache_serialize();
-	self->_thread_safe_.unlock();
 
 	if (cache_blob.is_empty()) {
 		return;

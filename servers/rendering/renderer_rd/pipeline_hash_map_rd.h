@@ -176,7 +176,8 @@ public:
 	}
 
 	// Retrieve a pipeline. It'll return an empty pipeline if it's not available yet, but it'll be guaranteed to succeed if 'wait for compilation' is true and stall as necessary. Source is just an optional number to aid debugging.
-	RID get_pipeline(const Key &p_key, uint32_t p_key_hash, bool p_wait_for_compilation, RSE::PipelineSource p_source) {
+	// 'high priority compilation' only matters when not waiting, it makes a missing pipeline compile ahead of background work so it is ready for the next frame.
+	RID get_pipeline(const Key &p_key, uint32_t p_key_hash, bool p_wait_for_compilation, RSE::PipelineSource p_source, bool p_high_priority_compilation = false) {
 		RBMap<uint32_t, RID>::Element *e = hash_map.find(p_key_hash);
 
 		if (e == nullptr) {
@@ -188,7 +189,7 @@ public:
 
 		if (e == nullptr) {
 			// Request compilation. The method will ignore the request if it's already being compiled.
-			compile_pipeline(p_key, p_key_hash, p_source, p_wait_for_compilation);
+			compile_pipeline(p_key, p_key_hash, p_source, p_wait_for_compilation || p_high_priority_compilation);
 
 			if (p_wait_for_compilation) {
 				wait_for_pipeline(p_key_hash);

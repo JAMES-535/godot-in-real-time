@@ -219,6 +219,9 @@ void JoltHeightMapShape3D::set_data(const Variant &p_data) {
 	const Variant maybe_depth = data.get("depth", Variant());
 	ERR_FAIL_COND(maybe_depth.get_type() != Variant::INT);
 
+	// A background build may still be reading the old data
+	_settle_async_build();
+
 	heights = maybe_heights;
 	width = maybe_width;
 	depth = maybe_depth;
@@ -226,6 +229,7 @@ void JoltHeightMapShape3D::set_data(const Variant &p_data) {
 	aabb = _calculate_aabb();
 
 	destroy();
+	build_async();
 }
 
 String JoltHeightMapShape3D::to_string() const {

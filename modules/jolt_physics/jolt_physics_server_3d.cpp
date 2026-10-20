@@ -1626,9 +1626,12 @@ void JoltPhysicsServer3D::set_active(bool p_active) {
 void JoltPhysicsServer3D::init() {
 	job_system = new JoltJobSystem();
 	temp_allocator = new JoltTempAllocator();
+	JoltShape3D::start_builder_thread();
 }
 
 void JoltPhysicsServer3D::finish() {
+	JoltShape3D::stop_builder_thread();
+
 	if (temp_allocator != nullptr) {
 		delete temp_allocator;
 		temp_allocator = nullptr;
@@ -1724,6 +1727,7 @@ void JoltPhysicsServer3D::free_soft_body(JoltSoftBody3D *p_body) {
 void JoltPhysicsServer3D::free_shape(JoltShape3D *p_shape) {
 	ERR_FAIL_NULL(p_shape);
 
+	p_shape->join_async_build();
 	p_shape->remove_self();
 	shape_owner.free(p_shape->get_rid());
 	memdelete(p_shape);

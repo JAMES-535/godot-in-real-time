@@ -60,6 +60,8 @@ namespace RendererSceneRenderImplementation {
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
 
+	bool stall_on_missing_pipelines = false; // rendering/shader_compiler/stall_on_missing_pipelines
+
 	enum {
 		SCENE_UNIFORM_SET = 0,
 		RENDER_PASS_UNIFORM_SET = 1,
@@ -587,6 +589,7 @@ private:
 		RID voxel_gi_instances[MAX_VOXEL_GI_INSTANCESS_PER_INSTANCE];
 		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
 		SelfList<GeometryInstanceForwardClustered> dirty_list_element;
+		bool waiting_for_shader = false; // A surface used a placeholder because its shader was still compiling; re-evaluate next update.
 
 		GeometryInstanceForwardClustered() :
 				dirty_list_element(this) {}

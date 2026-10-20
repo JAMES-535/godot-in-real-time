@@ -1799,22 +1799,39 @@ bool LightStorage::reflection_probe_instance_begin_render(RID p_instance, RID p_
 		}
 		//find the one used last
 		if (rpi->atlas_index == -1) {
-			//everything is in use, find the one least used via LRU
-			uint64_t pass_min = 0;
+			// Everything is in use, evict the least recently rendered-with slot (LRU). Note: the comparison
+			// started from pass_min = 0, which can never be true for an unsigned pass counter, so no slot was
+			// ever evicted and the probe went on to render with atlas_index == -1 and crashed in end_render().
+			uint64_t pass_min = UINT64_MAX;
 
 			for (int i = 0; i < atlas->reflections.size(); i++) {
 				ReflectionProbeInstance *rpi2 = reflection_probe_instance_owner.get_or_null(atlas->reflections[i].owner);
+				if (rpi2 == nullptr) {
+					rpi->atlas_index = i;
+					break;
+				}
 				if (rpi2->last_pass < pass_min) {
 					pass_min = rpi2->last_pass;
 					rpi->atlas_index = i;
 				}
 			}
+
+			if (rpi->atlas_index != -1) {
+				ReflectionProbeInstance *evicted = reflection_probe_instance_owner.get_or_null(atlas->reflections[rpi->atlas_index].owner);
+				if (evicted != nullptr && evicted != rpi) {
+					evicted->atlas_index = -1;
+					evicted->dirty = true; // Re-render when it is next needed.
+					evicted->rendering = false;
+				}
+			}
 		}
 	}
 
-	if (rpi->atlas_index != -1) { // should we fail if this is still -1 ?
-		atlas->reflections.write[rpi->atlas_index].owner = p_instance;
+	if (rpi->atlas_index == -1) {
+		ERR_PRINT_ONCE("Reflection probe atlas is full and no slot could be reclaimed; the probe will not render. Consider increasing Rendering > Reflections > Reflection Atlas > Reflection Count.");
+		return false;
 	}
+	atlas->reflections.write[rpi->atlas_index].owner = p_instance;
 
 	rpi->atlas = p_reflection_atlas;
 	rpi->rendering = true;
@@ -1835,6 +1852,7 @@ bool LightStorage::reflection_probe_instance_end_render(RID p_instance, RID p_re
 
 	ReflectionProbeInstance *rpi = reflection_probe_instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL_V(rpi, false);
+	ERR_FAIL_INDEX_V(rpi->atlas_index, atlas->reflections.size(), false);
 
 	RD::get_singleton()->draw_command_begin_label("Convert reflection probe to octahedral");
 	copy_effects->copy_cubemap_to_octmap(atlas->color_buffer, atlas->reflections.write[rpi->atlas_index].data.layers[0].mipmaps[0].framebuffer, atlas->uv_border_size);

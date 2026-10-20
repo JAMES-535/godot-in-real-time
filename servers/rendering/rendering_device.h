@@ -33,6 +33,10 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/condition_variable.h"
 #include "core/os/thread_safe.h"
+
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include "core/templates/local_vector.h"
 #include "core/templates/rb_map.h"
 #include "core/templates/rb_set.h"
@@ -64,10 +68,64 @@ class RDAccelerationStructureInstance;
 class RDPipelineShader;
 class RDHitGroup;
 
+// A recursive mutex that hands the lock to waiters in arrival order
+class FairRecursiveMutex {
+	std::mutex guard;
+	std::condition_variable cv;
+	uint64_t next_ticket = 0;
+	uint64_t now_serving = 0;
+	std::thread::id owner;
+	uint32_t depth = 0;
+
+public:
+	void lock() {
+		const std::thread::id self = std::this_thread::get_id();
+		std::unique_lock<std::mutex> l(guard);
+		if (depth > 0 && owner == self) {
+			depth++;
+			return;
+		}
+		const uint64_t ticket = next_ticket++;
+		cv.wait(l, [&] { return now_serving == ticket; });
+		owner = self;
+		depth = 1;
+	}
+	bool try_lock() {
+		const std::thread::id self = std::this_thread::get_id();
+		std::unique_lock<std::mutex> l(guard);
+		if (depth > 0 && owner == self) {
+			depth++;
+			return true;
+		}
+		if (next_ticket == now_serving) {
+			next_ticket++;
+			owner = self;
+			depth = 1;
+			return true;
+		}
+		return false;
+	}
+	void unlock() {
+		std::unique_lock<std::mutex> l(guard);
+		if (depth == 0) {
+			return;
+		}
+		if (--depth == 0) {
+			owner = std::thread::id();
+			now_serving++;
+			const bool waiters = next_ticket != now_serving;
+			l.unlock();
+			if (waiters) {
+				cv.notify_all();
+			}
+		}
+	}
+};
+
 class RenderingDevice : public RenderingDeviceCommons {
 	GDCLASS(RenderingDevice, Object)
 
-	_THREAD_SAFE_CLASS_
+	mutable MutexImpl<FairRecursiveMutex> _thread_safe_;
 
 private:
 	Thread::ID render_thread_id;
@@ -1240,9 +1298,13 @@ private:
 	size_t pipeline_cache_size = 0;
 	String pipeline_cache_file_path;
 	WorkerThreadPool::TaskID pipeline_cache_save_task = WorkerThreadPool::INVALID_TASK_ID;
+	// Guards the pipeline cache bookkeeping and the driver's cache buffer, so serializing the cache never has to hold the device wide mutex.
+	BinaryMutex pipeline_cache_mutex;
+	void _update_pipeline_cache_locked(bool p_closing);
 
 	Vector<uint8_t> _load_pipeline_cache();
 	static void _save_pipeline_cache(void *p_data);
+	static void _save_pipeline_cache_locked(void *p_data);
 
 	struct ComputePipeline {
 		RID shader;

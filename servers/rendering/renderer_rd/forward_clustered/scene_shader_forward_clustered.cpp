@@ -556,6 +556,14 @@ uint64_t SceneShaderForwardClustered::ShaderData::get_vertex_input_mask(Pipeline
 	return input_mask;
 }
 
+bool SceneShaderForwardClustered::ShaderData::is_ready() const {
+	if (version.is_valid()) {
+		ERR_FAIL_NULL_V(SceneShaderForwardClustered::singleton, false);
+		return SceneShaderForwardClustered::singleton->shader.version_is_ready(version);
+	}
+	return false;
+}
+
 bool SceneShaderForwardClustered::ShaderData::is_valid() const {
 	if (version.is_valid()) {
 		ERR_FAIL_NULL_V(SceneShaderForwardClustered::singleton, false);
@@ -593,6 +601,13 @@ void SceneShaderForwardClustered::MaterialData::set_render_priority(int p_priori
 
 void SceneShaderForwardClustered::MaterialData::set_next_pass(RID p_pass) {
 	next_pass = p_pass;
+}
+
+bool SceneShaderForwardClustered::MaterialData::is_shader_ready() const {
+	if (shader_data == nullptr || shader_data->version.is_null()) {
+		return true;
+	}
+	return SceneShaderForwardClustered::singleton->shader.version_is_ready(shader_data->version);
 }
 
 bool SceneShaderForwardClustered::MaterialData::update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) {

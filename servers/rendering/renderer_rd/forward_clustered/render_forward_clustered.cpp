@@ -528,7 +528,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 			if (shader != prev_shader || pipeline_hash != prev_pipeline_hash) {
 				RSE::PipelineSource pipeline_source = pipeline_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION;
-				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, pipeline_key.ubershader, pipeline_source);
+				// If the ubershader pipeline isn't compiled yet, either stall the frame until it is or skip
+				// this surface for a frame or two while it compiles at high priority.
+				const bool wait_for_pipeline = pipeline_key.ubershader && stall_on_missing_pipelines;
+				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, wait_for_pipeline, pipeline_source, pipeline_key.ubershader);
 
 				if (pipeline_rd.is_valid()) {
 					pipeline_valid = true;
@@ -4337,6 +4340,10 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(
 	while (material->next_pass.is_valid()) {
 		RID next_pass = material->next_pass;
 		material = static_cast<SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(next_pass, RendererRD::MaterialStorage::SHADER_TYPE_3D));
+		if (material && !material->shader_data->is_ready()) {
+			ginstance->waiting_for_shader = true;
+			break;
+		}
 		if (!material || !material->shader_data->is_valid()) {
 			break;
 		}
@@ -4357,7 +4364,12 @@ void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForw
 
 	if (m_src.is_valid()) {
 		material = static_cast<SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(m_src, RendererRD::MaterialStorage::SHADER_TYPE_3D));
-		if (!material || !material->shader_data->is_valid()) {
+		if (material && !material->shader_data->is_ready()) {
+			// Still compiling (is_valid() would block the render thread until it finished). Don't add the surface
+			// at all for now, the instance is reevaluated on the next update and picks the real material up once the shader is ready.
+			ginstance->waiting_for_shader = true;
+			return;
+		} else if (!material || !material->shader_data->is_valid()) {
 			material = nullptr;
 		}
 	}
@@ -4698,7 +4710,10 @@ void RenderForwardClustered::_mesh_compile_pipeline_for_surface(SceneShaderForwa
 	r_pipeline_key.vertex_format_id = mesh_storage->mesh_surface_get_vertex_format(p_mesh_surface, input_mask, p_instanced_surface, pipeline_motion_vectors, emulate_point_size);
 	r_pipeline_key.ubershader = p_ubershader;
 
-	p_shader->pipeline_hash_map.compile_pipeline(r_pipeline_key, r_pipeline_key.hash(), p_source, p_ubershader);
+	// Low priority, pipeline compilation is CPU heavy and a zone load queues hundreds of them.
+	// As high priority tasks they fill every worker thread and per frame jobs end up waiting behind them.
+	// Low priority tasks are capped by threading/worker_pool/low_priority_thread_ratio.
+	p_shader->pipeline_hash_map.compile_pipeline(r_pipeline_key, r_pipeline_key.hash(), p_source, false);
 
 	if (r_pipeline_pairs != nullptr) {
 		r_pipeline_pairs->push_back({ p_shader, r_pipeline_key });
@@ -4870,8 +4885,20 @@ void RenderForwardClustered::_mesh_generate_all_pipelines_for_surface_cache(Geom
 }
 
 void RenderForwardClustered::_update_dirty_geometry_instances() {
+	thread_local LocalVector<GeometryInstanceForwardClustered *> retry;
+	retry.clear();
 	while (geometry_instance_dirty_list.first()) {
-		_geometry_instance_update(geometry_instance_dirty_list.first()->self());
+		GeometryInstanceForwardClustered *ginstance = geometry_instance_dirty_list.first()->self();
+		ginstance->waiting_for_shader = false;
+		_geometry_instance_update(ginstance);
+		if (ginstance->waiting_for_shader) {
+			retry.push_back(ginstance);
+		}
+	}
+	// Instances that used a placeholder material because a shader was still compiling go back on the dirty
+	// list, so they pick up the real material as soon as it is ready (next pass or next frame).
+	for (GeometryInstanceForwardClustered *ginstance : retry) {
+		ginstance->_mark_dirty();
 	}
 
 	_update_dirty_geometry_pipelines();
@@ -5138,6 +5165,7 @@ void RenderForwardClustered::_update_shader_quality_settings() {
 
 RenderForwardClustered::RenderForwardClustered() {
 	singleton = this;
+	stall_on_missing_pipelines = GLOBAL_DEF_RST("rendering/shader_compiler/stall_on_missing_pipelines", false);
 
 	/* SCENE SHADER */
 

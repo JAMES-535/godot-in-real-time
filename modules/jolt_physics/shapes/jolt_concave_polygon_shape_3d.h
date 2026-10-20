@@ -42,6 +42,8 @@ class JoltConcavePolygonShape3D final : public JoltShape3D {
 	AABB _calculate_aabb() const;
 
 public:
+	virtual ~JoltConcavePolygonShape3D() override { join_async_build(); }
+
 	virtual ShapeType get_type() const override { return ShapeType::SHAPE_CONCAVE_POLYGON; }
 	virtual bool is_convex() const override { return false; }
 

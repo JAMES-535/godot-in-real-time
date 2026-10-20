@@ -315,6 +315,8 @@ public:
 		uint64_t get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader);
 		RD::PolygonCullMode get_cull_mode_from_cull_variant(CullVariant p_cull_variant);
 		bool is_valid() const;
+		// Nonblocking, false while the shader is still compiling
+		bool is_ready() const;
 
 		SelfList<ShaderData> shader_list_element;
 		ShaderData();
@@ -338,6 +340,7 @@ public:
 		virtual void set_render_priority(int p_priority);
 		virtual void set_next_pass(RID p_pass);
 		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty);
+		virtual bool is_shader_ready() const override;
 		virtual ~MaterialData();
 	};
 

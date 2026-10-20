@@ -31,6 +31,8 @@
 #include "jolt_shape_3d.h"
 
 #include "../misc/jolt_type_conversions.h"
+#include "core/os/thread.h"
+#include "core/templates/list.h"
 #include "../objects/jolt_shaped_object_3d.h"
 #include "jolt_custom_double_sided_shape.h"
 #include "jolt_custom_user_data_shape.h"
@@ -46,6 +48,14 @@ namespace {
 
 constexpr float DEFAULT_SOLVER_BIAS = 0.0;
 
+// Builder thread state.
+Thread *builder_thread = nullptr;
+Mutex builder_queue_mutex;
+Semaphore builder_queue_sem;
+List<JoltShape3D::AsyncBuild *> builder_queue;
+bool builder_exit = false;
+bool builder_running = false;
+
 } // namespace
 
 String JoltShape3D::_owners_to_string() const {
@@ -60,7 +70,9 @@ String JoltShape3D::_owners_to_string() const {
 	return vformat("'%s' and %d other object(s)", random_owner.to_string(), owner_count - 1);
 }
 
-JoltShape3D::~JoltShape3D() = default;
+JoltShape3D::~JoltShape3D() {
+	_settle_async_build();
+}
 
 void JoltShape3D::add_owner(JoltShapedObject3D *p_owner) {
 	ref_counts_by_owner[p_owner]++;
@@ -92,11 +104,197 @@ void JoltShape3D::set_solver_bias(float p_bias) {
 	}
 }
 
+void JoltShape3D::start_builder_thread() {
+	if (builder_running) {
+		return;
+	}
+
+	builder_exit = false;
+	builder_running = true;
+
+	Thread::Settings settings;
+	settings.priority = Thread::PRIORITY_LOW;
+	builder_thread = memnew(Thread);
+	builder_thread->start(&JoltShape3D::_builder_thread_func, nullptr, settings);
+}
+
+void JoltShape3D::stop_builder_thread() {
+	if (!builder_running) {
+		return;
+	}
+
+	{
+		MutexLock lock(builder_queue_mutex);
+		builder_exit = true;
+	}
+	builder_queue_sem.post();
+	builder_thread->wait_to_finish();
+	memdelete(builder_thread);
+	builder_thread = nullptr;
+	builder_running = false;
+
+	// Drop whatever was still queued and detach the shapes that pointed at those jobs
+	MutexLock lock(builder_queue_mutex);
+	while (!builder_queue.is_empty()) {
+		AsyncBuild *job = builder_queue.front()->get();
+		builder_queue.pop_front();
+
+		JoltShape3D *shape = nullptr;
+		{
+			MutexLock job_lock(job->mutex);
+			shape = job->shape;
+			job->shape = nullptr;
+		}
+		if (shape != nullptr) {
+			MutexLock shape_lock(shape->jolt_ref_mutex);
+			if (shape->async_build == job) {
+				shape->async_build = nullptr;
+			}
+		}
+		memdelete(job);
+	}
+}
+
+void JoltShape3D::_builder_thread_func(void *p_unused) {
+	Thread::set_name("JoltShapeBuilder");
+
+	while (true) {
+		builder_queue_sem.wait();
+
+		AsyncBuild *job = nullptr;
+		{
+			MutexLock lock(builder_queue_mutex);
+			if (builder_exit) {
+				return;
+			}
+			if (builder_queue.is_empty()) {
+				continue;
+			}
+			job = builder_queue.front()->get();
+			builder_queue.pop_front();
+		}
+
+		JoltShape3D *shape = nullptr;
+		{
+			MutexLock lock(job->mutex);
+			if (job->shape == nullptr) {
+				// Cancelled before we got to it
+				memdelete(job);
+				continue;
+			}
+			job->running = true;
+			shape = job->shape;
+		}
+
+		// From here until `running` is cleared the shape is guaranteed alive
+		JPH::ShapeRefC built = shape->_build();
+
+		{
+			MutexLock lock(shape->jolt_ref_mutex);
+			if (shape->async_build == job && shape->jolt_ref == nullptr) {
+				shape->jolt_ref = built;
+			}
+		}
+
+		{
+			MutexLock lock(job->mutex);
+			job->running = false;
+			job->shape = nullptr;
+			job->finished = true;
+		}
+		job->finished_sem.post();
+	}
+}
+
+void JoltShape3D::build_async() {
+	if (!builder_running) {
+		return;
+	}
+
+	AsyncBuild *job = nullptr;
+
+	{
+		MutexLock lock(jolt_ref_mutex);
+
+		if (jolt_ref != nullptr || async_build != nullptr) {
+			return;
+		}
+
+		job = memnew(AsyncBuild);
+		job->shape = this;
+		async_build = job;
+	}
+
+	{
+		MutexLock queue_lock(builder_queue_mutex);
+		builder_queue.push_back(job);
+	}
+	builder_queue_sem.post();
+}
+
+// Settles the pending background build, if any. Afterwards async_build is null.
+// - Running: waited for (the result is wanted, or the data it reads is about to change or go away).
+// - Queued: cancelled without waiting, the builder deletes the job when it dequeues it.
+// - Finished: the job is deleted here.
+// Caller must NOT hold jolt_ref_mutex.
+void JoltShape3D::_settle_async_build() {
+	AsyncBuild *job = nullptr;
+
+	{
+		MutexLock lock(jolt_ref_mutex);
+		job = async_build;
+	}
+
+	if (job == nullptr) {
+		return;
+	}
+
+	bool wait = false;
+	bool owned = false;
+
+	{
+		MutexLock lock(job->mutex);
+		if (job->running) {
+			wait = true;
+			owned = true;
+		} else if (job->finished) {
+			owned = true;
+		} else {
+			// Not started: cancel
+			job->shape = nullptr;
+		}
+	}
+
+	if (wait) {
+		// The builder stores its result while async_build still points at this job, so it must stay set until the build has finished.
+		job->finished_sem.wait();
+	}
+
+	{
+		MutexLock lock(jolt_ref_mutex);
+		if (async_build == job) {
+			async_build = nullptr;
+		}
+	}
+
+	if (owned) {
+		memdelete(job);
+	}
+}
+
 JPH::ShapeRefC JoltShape3D::try_build() {
 	jolt_ref_mutex.lock();
 
 	if (jolt_ref == nullptr) {
-		jolt_ref = _build();
+		if (async_build != nullptr) {
+			// A background build may be about to deliver
+			jolt_ref_mutex.unlock();
+			_settle_async_build();
+			jolt_ref_mutex.lock();
+		}
+		if (jolt_ref == nullptr) {
+			jolt_ref = _build();
+		}
 	}
 
 	jolt_ref_mutex.unlock();
@@ -105,6 +303,8 @@ JPH::ShapeRefC JoltShape3D::try_build() {
 }
 
 void JoltShape3D::destroy() {
+	_settle_async_build();
+
 	jolt_ref_mutex.lock();
 	jolt_ref = nullptr;
 	jolt_ref_mutex.unlock();

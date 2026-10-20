@@ -249,11 +249,26 @@ RID ShaderRD::version_create(bool p_embedded) {
 	return rid;
 }
 
+void ShaderRD::_update_ready_flag(Version *p_version) {
+	// Caller holds the version mutex.
+	bool all_done = !p_version->dirty && p_version->group_compilation_tasks.size() == group_enabled.size();
+	if (all_done) {
+		for (int i = 0; i < group_enabled.size(); i++) {
+			if (group_enabled[i] && p_version->group_compilation_tasks[i] != 0) {
+				all_done = false;
+				break;
+			}
+		}
+	}
+	p_version->ready.set_to(all_done);
+}
+
 void ShaderRD::_initialize_version(Version *p_version) {
 	_clear_version(p_version);
 
 	p_version->valid = false;
 	p_version->dirty = false;
+	p_version->ready.clear();
 
 	p_version->variants.resize_initialized(variant_defines.size());
 	p_version->variant_data.resize(variant_defines.size());
@@ -679,7 +694,9 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 	compile_data.version = p_version;
 	compile_data.group = p_group;
 
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_load_variant_from_cache, compile_data, variant_count, -1, true, "LoadVariantFromCache");
+	// Low priority for the same reason as the compile path: with a warm shader cache a zone load turns into a burst of
+	// vkCreateShaderModule calls (the driver still does real work there) that would otherwise take every worker thread.
+	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_load_variant_from_cache, compile_data, variant_count, -1, false, "LoadVariantFromCache");
 	p_version->group_compilation_tasks.write[p_group] = group_task;
 	p_version->group_loaded_from_cache.write[p_group] = true;
 
@@ -731,7 +748,9 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 	compile_data.version = p_version;
 	compile_data.group = p_group;
 
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, true, SNAME("ShaderCompilation"));
+	// Low priority so a burst of shader compilations (every new .gdshader a streamed zone brings in, ~30 variants each)
+	// can't occupy every worker thread and starve the per-frame jobs the render thread waits on.
+	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, false, SNAME("ShaderCompilation"));
 	p_version->group_compilation_tasks.write[p_group] = group_task;
 	p_version->group_loaded_from_cache.write[p_group] = false;
 }
@@ -770,6 +789,7 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 
 		p_version->variants.clear();
 		p_version->variant_data.clear();
+		_update_ready_flag(p_version);
 		return;
 	}
 #if ENABLE_SHADER_CACHE
@@ -779,6 +799,7 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 #endif
 
 	p_version->valid = true;
+	_update_ready_flag(p_version);
 }
 
 void ShaderRD::_compile_ensure_finished(Version *p_version) {
@@ -800,6 +821,7 @@ void ShaderRD::_version_set(Version *p_version, const HashMap<String, String> &p
 	}
 
 	p_version->dirty = true;
+	p_version->ready.clear();
 	if (p_version->initialize_needed) {
 		_initialize_version(p_version);
 		for (int i = 0; i < group_enabled.size(); i++) {
@@ -882,6 +904,54 @@ bool ShaderRD::version_is_valid(RID p_version) {
 	_compile_ensure_finished(version);
 
 	return version->valid;
+}
+
+bool ShaderRD::version_is_ready(RID p_version) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+
+	if (version->ready.is_set()) {
+		// Already built. Don't take the mutex: a loader thread holding it briefly (mesh_generate_pipelines ->
+		// is_valid()) must not make instances using this shader disappear for a frame.
+		return true;
+	}
+
+	if (!version->mutex->try_lock()) {
+		// Another thread is setting code or waiting on this version's compilation (e.g. a loader thread in
+		// mesh_generate_pipelines()). Don't queue up behind it.
+		return false;
+	}
+
+	if (version->dirty) {
+		_initialize_version(version);
+		for (int i = 0; i < group_enabled.size(); i++) {
+			if (!group_enabled[i]) {
+				_allocate_placeholders(version, i);
+				continue;
+			}
+			_compile_version_start(version, i);
+		}
+	}
+
+	// Finish the groups whose tasks have completed; never wait for the ones still running.
+	bool pending = false;
+	for (int i = 0; i < group_enabled.size(); i++) {
+		if (!group_enabled[i] || version->group_compilation_tasks.size() <= i) {
+			continue;
+		}
+		WorkerThreadPool::GroupID task = version->group_compilation_tasks[i];
+		if (task == 0) {
+			continue;
+		}
+		if (WorkerThreadPool::get_singleton()->is_group_task_completed(task)) {
+			_compile_version_end(version, i);
+		} else {
+			pending = true;
+		}
+	}
+
+	version->mutex->unlock();
+	return !pending;
 }
 
 bool ShaderRD::version_free(RID p_version) {

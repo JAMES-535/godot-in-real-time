@@ -32,6 +32,7 @@
 
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
+#include <atomic>
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "servers/rendering/rendering_device.h"
@@ -90,6 +91,21 @@ private:
 
 		bool valid;
 		bool dirty;
+		// Set once every enabled group has finished compiling (success or failure), cleared when the code changes.
+		// Lets version_is_ready() answer without touching the mutex for the common case of an already-built shader.
+		struct ReadyFlag {
+			std::atomic<bool> value{ false };
+			ReadyFlag() {}
+			ReadyFlag(const ReadyFlag &p_other) :
+					value(p_other.value.load()) {}
+			ReadyFlag &operator=(const ReadyFlag &p_other) {
+				value.store(p_other.value.load());
+				return *this;
+			}
+			_FORCE_INLINE_ bool is_set() const { return value.load(std::memory_order_acquire); }
+			_FORCE_INLINE_ void set_to(bool p_v) { value.store(p_v, std::memory_order_release); }
+			_FORCE_INLINE_ void clear() { set_to(false); }
+		} ready;
 		bool initialize_needed;
 		bool embedded;
 	};
@@ -231,6 +247,12 @@ public:
 	}
 
 	bool version_is_valid(RID p_version);
+
+	// Non-blocking variant of version_is_valid(): returns true once the version's compilation has finished
+	// (successfully or not), and false while it is still compiling or another thread is working on it.
+	// Never waits, so it is safe to call from the render thread every frame.
+	bool version_is_ready(RID p_version);
+	void _update_ready_flag(Version *p_version);
 
 	bool version_free(RID p_version);
 

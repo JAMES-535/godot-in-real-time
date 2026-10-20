@@ -302,6 +302,11 @@ private:
 	// mutexes (push → wait_and_flush). The atomics therefore only need atomicity
 	// (tear-free reads/writes), not ordering, so memory_order_relaxed is used.
 	struct StreamingState {
+		// Held by the I/O thread for the duration of one reload
+		// and taken once by texture_remove() after `removing` is set, so a free only ever waits for
+		// the single reload that may be in flight on this texture, never for the whole I/O queue.
+		BinaryMutex reload_mutex;
+
 		// Configuration
 		RID texture;
 		uint16_t width = 0;
@@ -412,6 +417,7 @@ private:
 	uint8_t setting_min_lod = 0; // Best quality mip level - 0 = full resolution
 	uint8_t setting_max_lod = 3; // Worst quality mip level - 3 ≈ 128px for 8K texture
 	uint32_t setting_max_ops_per_second = 500; // 60 fps would be ~8 ops/frame
+	uint32_t setting_max_mb_per_second = 96; // Upload bandwidth cap - 0 = unlimited
 	uint64_t setting_inactivity_decay_rate_ms = 5000; // Time per mip level of decay (ms)
 	uint32_t setting_budget_mb_override = UINT32_MAX;
 	uint8_t setting_min_lod_override = UINT8_MAX;
@@ -498,6 +504,13 @@ private:
 
 	// I/O thread for texture reloading - uses its own command queue
 	SimpleCommandQueue io_command_queue;
+
+	// Pending reloads. Every entry has a matching `_do_next_texture_reload` command on the I/O queue
+	BinaryMutex reload_queue_mutex;
+	LocalVector<RID> reload_queue;
+	void _queue_texture_reload(RID p_state_rid);
+	void _do_next_texture_reload();
+	static uint32_t _reload_priority(const StreamingState *p_state);
 	Thread texture_reload_thread;
 
 	static void _texture_reload_thread_func(void *p_udata);

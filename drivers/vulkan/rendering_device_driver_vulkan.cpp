@@ -1550,8 +1550,41 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	return OK;
 }
 
+static bool vma_log_enabled = false;
+
+static String _vma_heap_summary(VmaAllocator p_allocator) {
+	// Per heap usage vs what the driver says we may use. Once "used" reaches "budget" on the device local heap,
+	// new allocations are silently placed in system memory and everything that touches them slows down.
+	const VkPhysicalDeviceMemoryProperties *props = nullptr;
+	vmaGetMemoryProperties(p_allocator, &props);
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] = {};
+	vmaGetHeapBudgets(p_allocator, budgets);
+	String s;
+	for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
+		const bool device_local = props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+		s += vformat(" heap%d%s %d/%d MB", i, device_local ? "(vram)" : "", budgets[i].usage / (1024 * 1024), budgets[i].budget / (1024 * 1024));
+	}
+	return s;
+}
+
+static void VKAPI_PTR _vma_log_allocate(VmaAllocator p_allocator, uint32_t p_memory_type, VkDeviceMemory p_memory, VkDeviceSize p_size, void *p_user_data) {
+	print_line(vformat("[vma] +%.1f MB device memory (type %d) at %d ms |%s", double(p_size) / (1024.0 * 1024.0), p_memory_type, OS::get_singleton()->get_ticks_msec(), _vma_heap_summary(p_allocator)));
+}
+
+static void VKAPI_PTR _vma_log_free(VmaAllocator p_allocator, uint32_t p_memory_type, VkDeviceMemory p_memory, VkDeviceSize p_size, void *p_user_data) {
+	print_line(vformat("[vma] -%.1f MB device memory (type %d) at %d ms", double(p_size) / (1024.0 * 1024.0), p_memory_type, OS::get_singleton()->get_ticks_msec()));
+}
+
 Error RenderingDeviceDriverVulkan::_initialize_allocator() {
 	VmaAllocatorCreateInfo allocator_info = {};
+	// GODOT_VMA_LOG=1 prints every vkAllocateMemory/vkFreeMemory with its size
+	VmaDeviceMemoryCallbacks memory_callbacks = {};
+	vma_log_enabled = OS::get_singleton()->get_environment("GODOT_VMA_LOG") == "1";
+	if (vma_log_enabled) {
+		memory_callbacks.pfnAllocate = _vma_log_allocate;
+		memory_callbacks.pfnFree = _vma_log_free;
+		allocator_info.pDeviceMemoryCallbacks = &memory_callbacks;
+	}
 	allocator_info.physicalDevice = physical_device;
 	allocator_info.device = vk_device;
 	allocator_info.instance = context_driver->instance_get();
@@ -1562,6 +1595,9 @@ Error RenderingDeviceDriverVulkan::_initialize_allocator() {
 	if (buffer_device_address_support) {
 		allocator_info.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	}
+	// VMAs default is 256 MB blocks. A vkAllocateMemory of that size holds a driver wide lock for 100-300 ms
+	// Smaller blocks keep each stall short
+	allocator_info.preferredLargeHeapBlockSize = 64ull * 1024ull * 1024ull;
 	VkResult err = vmaCreateAllocator(&allocator_info, &allocator);
 	ERR_FAIL_COND_V_MSG(err, ERR_CANT_CREATE, vformat("Couldn't create Vulkan memory allocator (VkResult error %d).", err));
 
@@ -1925,6 +1961,67 @@ VmaPool RenderingDeviceDriverVulkan::_find_or_create_small_allocs_pool(uint32_t 
 	return pool;
 }
 
+// Sampled textures are suballocated from large fixed size VMA blocks instead of one dedicated VkDeviceMemory per image
+static const VkDeviceSize SAMPLED_TEXTURE_POOL_BLOCK_SIZE = 64u * 1024u * 1024u;
+// Only images well below the block size go to the pool, anything larger would fragment or fail.
+static const VkDeviceSize SAMPLED_TEXTURE_POOL_MAX_IMAGE_SIZE = SAMPLED_TEXTURE_POOL_BLOCK_SIZE / 2;
+// Lightmap texture arrays are 40-140 MB each, they get their own pool with larger blocks.
+static const VkDeviceSize LARGE_TEXTURE_POOL_BLOCK_SIZE = 256u * 1024u * 1024u;
+static const VkDeviceSize LARGE_TEXTURE_POOL_MAX_IMAGE_SIZE = LARGE_TEXTURE_POOL_BLOCK_SIZE / 2;
+
+// Dense meshes can have vertex buffers of 50+ MB, the buffer pool uses bigger blocks so those stay pooled.
+static const VkDeviceSize GPU_BUFFER_POOL_BLOCK_SIZE = 256u * 1024u * 1024u;
+static const VkDeviceSize GPU_BUFFER_POOL_MAX_BUFFER_SIZE = GPU_BUFFER_POOL_BLOCK_SIZE / 2;
+
+// Pools for the memory that streams in and out while playing
+VmaPool RenderingDeviceDriverVulkan::_find_or_create_block_pool(HashMap<uint32_t, VmaPool> &p_pools, uint32_t p_mem_type_index, VkDeviceSize p_block_size, uint32_t p_reserved_blocks, const char *p_name) {
+	if (p_pools.has(p_mem_type_index)) {
+		return p_pools[p_mem_type_index];
+	}
+
+	print_line(vformat("Creating VMA %s pool for memory type index %d (%d blocks of %d MB reserved).", p_name, p_mem_type_index, p_reserved_blocks, p_block_size / (1024 * 1024)));
+
+	VmaPoolCreateInfo pci = {};
+	pci.memoryTypeIndex = p_mem_type_index;
+	pci.flags = 0;
+	pci.blockSize = p_block_size;
+	pci.minBlockCount = p_reserved_blocks;
+	pci.maxBlockCount = SIZE_MAX;
+	pci.priority = 0.5f;
+	pci.minAllocationAlignment = 0;
+	pci.pMemoryAllocateNext = nullptr;
+	VmaPool pool = VK_NULL_HANDLE;
+	VkResult res = vmaCreatePool(allocator, &pci, &pool);
+	if (res != VK_SUCCESS && p_reserved_blocks > 0) {
+		// Couldnt reserve that much, try again without the reservation
+		pci.minBlockCount = 0;
+		res = vmaCreatePool(allocator, &pci, &pool);
+	}
+	if (res != VK_SUCCESS) {
+		pool = VK_NULL_HANDLE;
+	}
+	// Don't try to create it again if failed the first time
+	p_pools[p_mem_type_index] = pool;
+	ERR_FAIL_COND_V_MSG(res, VK_NULL_HANDLE, vformat("Couldn't create Vulkan %s pool (VkResult error %d)", p_name, res));
+
+	return pool;
+}
+
+VmaPool RenderingDeviceDriverVulkan::_find_or_create_sampled_texture_pool(uint32_t p_mem_type_index) {
+	const int reserve_mb = GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/rendering_device/vulkan/sampled_texture_pool_reserve_mb", PROPERTY_HINT_RANGE, "0,4096,64"), 512);
+	return _find_or_create_block_pool(sampled_texture_pools, p_mem_type_index, SAMPLED_TEXTURE_POOL_BLOCK_SIZE, uint32_t(MAX(0, reserve_mb)) / uint32_t(SAMPLED_TEXTURE_POOL_BLOCK_SIZE / (1024 * 1024)), "sampled texture");
+}
+
+VmaPool RenderingDeviceDriverVulkan::_find_or_create_large_texture_pool(uint32_t p_mem_type_index) {
+	const int reserve_mb = GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/rendering_device/vulkan/large_texture_pool_reserve_mb", PROPERTY_HINT_RANGE, "0,4096,256"), 256);
+	return _find_or_create_block_pool(large_texture_pools, p_mem_type_index, LARGE_TEXTURE_POOL_BLOCK_SIZE, uint32_t(MAX(0, reserve_mb)) / uint32_t(LARGE_TEXTURE_POOL_BLOCK_SIZE / (1024 * 1024)), "large texture");
+}
+
+VmaPool RenderingDeviceDriverVulkan::_find_or_create_gpu_buffer_pool(uint32_t p_mem_type_index) {
+	const int reserve_mb = GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/rendering_device/vulkan/gpu_buffer_pool_reserve_mb", PROPERTY_HINT_RANGE, "0,4096,64"), 256);
+	return _find_or_create_block_pool(gpu_buffer_pools, p_mem_type_index, GPU_BUFFER_POOL_BLOCK_SIZE, uint32_t(MAX(0, reserve_mb)) / uint32_t(GPU_BUFFER_POOL_BLOCK_SIZE / (1024 * 1024)), "GPU buffer");
+}
+
 /*****************/
 /**** BUFFERS ****/
 /*****************/
@@ -2004,6 +2101,15 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 				uint32_t mem_type_index = 0;
 				vmaFindMemoryTypeIndexForBufferInfo(allocator, &create_info, &alloc_create_info, &mem_type_index);
 				alloc_create_info.pool = _find_or_create_small_allocs_pool(mem_type_index);
+			} else if (!p_usage.has_flag(BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT) && p_size <= GPU_BUFFER_POOL_MAX_BUFFER_SIZE) {
+				// Device local mesh/storage buffers, sub-allocate from the resident buffer pool
+				uint32_t mem_type_index = 0;
+				if (vmaFindMemoryTypeIndexForBufferInfo(allocator, &create_info, &alloc_create_info, &mem_type_index) == VK_SUCCESS) {
+					VmaPool pool = _find_or_create_gpu_buffer_pool(mem_type_index);
+					if (pool != VK_NULL_HANDLE) {
+						alloc_create_info.pool = pool;
+					}
+				}
 			}
 		} break;
 	}
@@ -2012,15 +2118,28 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	VmaAllocation allocation = nullptr;
 	VmaAllocationInfo alloc_info = {};
 
+	if (vma_log_enabled && p_size >= 16u * 1024u * 1024u) {
+		print_line(vformat("[vma] buffer %.1f MB usage 0x%x alloc_type %d", double(p_size) / (1024.0 * 1024.0), uint32_t(p_usage), int(p_allocation_type)));
+	}
+
 	if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
 		alloc_create_info.preferredFlags &= ~vma_flags_to_remove;
 		alloc_create_info.usage = vma_usage;
 		VkResult err = vmaCreateBuffer(allocator, &create_info, &alloc_create_info, &vk_buffer, &allocation, &alloc_info);
+		if (err != VK_SUCCESS && alloc_create_info.pool != VK_NULL_HANDLE) {
+			// Pooled allocation failed, fallback to a regular allocation.
+			alloc_create_info.pool = VK_NULL_HANDLE;
+			err = vmaCreateBuffer(allocator, &create_info, &alloc_create_info, &vk_buffer, &allocation, &alloc_info);
+		}
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't create buffer of size: %d (VkResult error %d).", p_size, err));
 	} else {
 		VkResult err = vkCreateBuffer(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER), &vk_buffer);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't create buffer of size: %d (VkResult error %d).", p_size, err));
 		err = vmaAllocateMemoryForBuffer(allocator, vk_buffer, &alloc_create_info, &allocation, &alloc_info);
+		if (err != VK_SUCCESS && alloc_create_info.pool != VK_NULL_HANDLE) {
+			alloc_create_info.pool = VK_NULL_HANDLE;
+			err = vmaAllocateMemoryForBuffer(allocator, vk_buffer, &alloc_create_info, &allocation, &alloc_info);
+		}
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't allocate memory for buffer of size: %d (VkResult error %d).", p_size, err));
 		err = vmaBindBufferMemory2(allocator, allocation, 0, vk_buffer, nullptr);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't bind memory to buffer of size: %d (VkResult error %d).", p_size, err));
@@ -2353,10 +2472,35 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 		alloc_create_info.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 	}
 
+	const bool extra_tracking = Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled();
+
+	if (vma_log_enabled && VkDeviceSize(image_size) * VkDeviceSize(MAX(1u, p_format.array_layers)) >= 16u * 1024u * 1024u) {
+		print_line(vformat("[vma] texture %dx%dx%d layers %d mips %d format %d usage 0x%x = %.1f MB", p_format.width, p_format.height, p_format.depth, p_format.array_layers, p_format.mipmaps, int(p_format.format), uint32_t(p_format.usage_bits), double(VkDeviceSize(image_size) * VkDeviceSize(MAX(1u, p_format.array_layers))) / (1024.0 * 1024.0)));
+	}
+
 	if (image_size <= SMALL_ALLOCATION_MAX_SIZE) {
 		uint32_t mem_type_index = 0;
 		vmaFindMemoryTypeIndexForImageInfo(allocator, &create_info, &alloc_create_info, &mem_type_index);
 		alloc_create_info.pool = _find_or_create_small_allocs_pool(mem_type_index);
+	} else {
+		// image_size is the size of ONE array layer, accounts for all layers
+		const VkDeviceSize total_image_size = VkDeviceSize(image_size) * VkDeviceSize(MAX(1u, p_format.array_layers));
+		const uint32_t render_or_readback = TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_RESOLVE_ATTACHMENT_BIT | TEXTURE_USAGE_INPUT_ATTACHMENT_BIT | TEXTURE_USAGE_VRS_ATTACHMENT_BIT | TEXTURE_USAGE_STORAGE_BIT | TEXTURE_USAGE_STORAGE_ATOMIC_BIT | TEXTURE_USAGE_CPU_READ_BIT | TEXTURE_USAGE_TRANSIENT_BIT;
+		const bool pool_candidate = (p_format.usage_bits & render_or_readback) == 0 && total_image_size <= LARGE_TEXTURE_POOL_MAX_IMAGE_SIZE;
+		if (pool_candidate) {
+			// Query the memory type with the exact create info that will be used for the allocation
+			VmaAllocationCreateInfo probe = alloc_create_info;
+			if (!extra_tracking) {
+				probe.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+			}
+			uint32_t mem_type_index = 0;
+			if (vmaFindMemoryTypeIndexForImageInfo(allocator, &create_info, &probe, &mem_type_index) == VK_SUCCESS) {
+				VmaPool pool = total_image_size <= SAMPLED_TEXTURE_POOL_MAX_IMAGE_SIZE ? _find_or_create_sampled_texture_pool(mem_type_index) : _find_or_create_large_texture_pool(mem_type_index);
+				if (pool != VK_NULL_HANDLE) {
+					alloc_create_info.pool = pool;
+				}
+			}
+		}
 	}
 
 	// Create.
@@ -2365,14 +2509,23 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 	VmaAllocation allocation = nullptr;
 	VmaAllocationInfo alloc_info = {};
 
-	if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
+	if (!extra_tracking) {
 		alloc_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 		VkResult err = vmaCreateImage(allocator, &create_info, &alloc_create_info, &vk_image, &allocation, &alloc_info);
+		if (err != VK_SUCCESS && alloc_create_info.pool != VK_NULL_HANDLE) {
+			// Pooled allocation failed (requirements larger than expected), fallback to a regular allocation.
+			alloc_create_info.pool = VK_NULL_HANDLE;
+			err = vmaCreateImage(allocator, &create_info, &alloc_create_info, &vk_image, &allocation, &alloc_info);
+		}
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image in memory for use with extra GPU memory tracking (VkResult error %d).", err));
 	} else {
 		VkResult err = vkCreateImage(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE), &vk_image);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image (VkResult error %d).", err));
 		err = vmaAllocateMemoryForImage(allocator, vk_image, &alloc_create_info, &allocation, &alloc_info);
+		if (err != VK_SUCCESS && alloc_create_info.pool != VK_NULL_HANDLE) {
+			alloc_create_info.pool = VK_NULL_HANDLE;
+			err = vmaAllocateMemoryForImage(allocator, vk_image, &alloc_create_info, &allocation, &alloc_info);
+		}
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't allocate memory for Vulkan image (VkResult error %d).", err));
 		err = vmaBindImageMemory2(allocator, allocation, 0, vk_image, nullptr);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't bind memory to Vulkan image (VkResult error %d).", err));
@@ -7490,6 +7643,27 @@ RenderingDeviceDriverVulkan::~RenderingDeviceDriverVulkan() {
 		HashMap<uint32_t, VmaPool>::Iterator E = small_allocs_pools.begin();
 		vmaDestroyPool(allocator, E->value);
 		small_allocs_pools.remove(E);
+	}
+	while (sampled_texture_pools.size()) {
+		HashMap<uint32_t, VmaPool>::Iterator E = sampled_texture_pools.begin();
+		if (E->value != VK_NULL_HANDLE) {
+			vmaDestroyPool(allocator, E->value);
+		}
+		sampled_texture_pools.remove(E);
+	}
+	while (large_texture_pools.size()) {
+		HashMap<uint32_t, VmaPool>::Iterator E = large_texture_pools.begin();
+		if (E->value != VK_NULL_HANDLE) {
+			vmaDestroyPool(allocator, E->value);
+		}
+		large_texture_pools.remove(E);
+	}
+	while (gpu_buffer_pools.size()) {
+		HashMap<uint32_t, VmaPool>::Iterator E = gpu_buffer_pools.begin();
+		if (E->value != VK_NULL_HANDLE) {
+			vmaDestroyPool(allocator, E->value);
+		}
+		gpu_buffer_pools.remove(E);
 	}
 	vmaDestroyAllocator(allocator);
 

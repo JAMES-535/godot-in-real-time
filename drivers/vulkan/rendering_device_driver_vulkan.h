@@ -220,8 +220,15 @@ private:
 
 	VmaAllocator allocator = nullptr;
 	HashMap<uint32_t, VmaPool> small_allocs_pools;
+	HashMap<uint32_t, VmaPool> sampled_texture_pools;
+	HashMap<uint32_t, VmaPool> gpu_buffer_pools;
+	HashMap<uint32_t, VmaPool> large_texture_pools;
 
 	VmaPool _find_or_create_small_allocs_pool(uint32_t p_mem_type_index);
+	VmaPool _find_or_create_block_pool(HashMap<uint32_t, VmaPool> &p_pools, uint32_t p_mem_type_index, VkDeviceSize p_block_size, uint32_t p_reserved_blocks, const char *p_name);
+	VmaPool _find_or_create_sampled_texture_pool(uint32_t p_mem_type_index);
+	VmaPool _find_or_create_gpu_buffer_pool(uint32_t p_mem_type_index);
+	VmaPool _find_or_create_large_texture_pool(uint32_t p_mem_type_index);
 
 private:
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)

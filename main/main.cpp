@@ -84,6 +84,152 @@
 #include "servers/text/text_server_dummy.h"
 
 #include "modules/register_module_types.h"
+
+#ifdef UNIX_ENABLED
+// Main thread hitch watchdog. Enable with the environment variable GODOT_HITCH_MS=<threshold>.
+// A background thread watches the main loop, when one iteration has been running for longer than the
+// threshold it asks the main thread to print its own stack to stderr, so the log shows *what* the frame was doing when it hitched.
+#include <dirent.h>
+#include <execinfo.h>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <cstdlib>
+#include <atomic>
+#include <cstdio>
+
+namespace {
+std::atomic<uint64_t> hitch_iteration{ 0 };
+std::atomic<bool> hitch_exit{ false };
+pthread_t hitch_main_thread;
+Thread hitch_thread;
+uint64_t hitch_threshold_ms = 0;
+// GODOT_HITCH_ALL_THREADS=1
+bool hitch_all_threads = false;
+
+std::atomic<int> hitch_print_lock{ 0 };
+
+void hitch_signal_handler(int) {
+	void *frames[128];
+	int n = backtrace(frames, 128);
+	// Serialize output between threads. Spinning in a handler is fine for a debugging, the critical section is a few writes.
+	while (hitch_print_lock.exchange(1)) {
+	}
+	char name[32] = { 0 };
+	prctl(PR_GET_NAME, name, 0, 0, 0);
+	char head[96];
+	int len = snprintf(head, sizeof(head), "[hitch] thread %ld \"%s\" stack:\n", (long)syscall(SYS_gettid), name);
+	ssize_t unused = write(STDERR_FILENO, head, len);
+	backtrace_symbols_fd(frames, n, STDERR_FILENO);
+	const char tail[] = "[hitch] ---- end of stack ----\n";
+	unused = write(STDERR_FILENO, tail, sizeof(tail) - 1);
+	(void)unused;
+	hitch_print_lock.store(0);
+}
+
+// Signal every thread of the process, so the log shows what the *other* threads were doing when the main thread was stuck
+void hitch_sample_all_threads() {
+	DIR *dir = opendir("/proc/self/task");
+	if (!dir) {
+		return;
+	}
+	const pid_t self = getpid();
+	const pid_t me = (pid_t)syscall(SYS_gettid);
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != nullptr) {
+		if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+			continue;
+		}
+		pid_t tid = (pid_t)atol(entry->d_name);
+		if (tid == me) {
+			continue;
+		}
+		syscall(SYS_tgkill, self, tid, SIGPROF);
+		// Give each thread a moment to print
+		OS::get_singleton()->delay_usec(300);
+	}
+	closedir(dir);
+}
+
+void hitch_thread_func(void *) {
+	Thread::set_name("HitchWatchdog");
+	uint64_t last_iter = hitch_iteration.load();
+	uint64_t frame_start = OS::get_singleton()->get_ticks_msec();
+	uint64_t next_sample = frame_start + hitch_threshold_ms;
+	int samples = 0;
+	while (!hitch_exit.load()) {
+		OS::get_singleton()->delay_usec(1000);
+		const uint64_t now = OS::get_singleton()->get_ticks_msec();
+		const uint64_t iter = hitch_iteration.load();
+		if (iter != last_iter) {
+			if (samples > 0) {
+				fprintf(stderr, "[hitch] frame %llu finished after ~%llu ms (at %llu ms)\n", (unsigned long long)last_iter, (unsigned long long)(now - frame_start), (unsigned long long)now);
+				fflush(stderr);
+			}
+			last_iter = iter;
+			frame_start = now;
+			next_sample = now + hitch_threshold_ms;
+			samples = 0;
+			continue;
+		}
+		if (now >= next_sample && samples < 4) {
+			samples++;
+			fprintf(stderr, "[hitch] frame %llu has been running for %llu ms (at %llu ms), main thread stack (sample %d):\n", (unsigned long long)iter, (unsigned long long)(now - frame_start), (unsigned long long)now, samples);
+			fflush(stderr);
+			if (samples == 2 && hitch_all_threads) {
+				// Second sample of a sustained hitch
+				fprintf(stderr, "[hitch] ---- all threads ----\n");
+				fflush(stderr);
+				pthread_kill(hitch_main_thread, SIGPROF);
+				OS::get_singleton()->delay_usec(1000);
+				hitch_sample_all_threads();
+				OS::get_singleton()->delay_usec(2000);
+				fprintf(stderr, "[hitch] ---- end of all threads ----\n");
+				fflush(stderr);
+			} else {
+				pthread_kill(hitch_main_thread, SIGPROF);
+			}
+			next_sample = now + hitch_threshold_ms * samples;
+		}
+	}
+}
+
+void hitch_watchdog_start() {
+	const String env = OS::get_singleton()->get_environment("GODOT_HITCH_MS");
+	if (env.is_empty() || !env.is_valid_int() || env.to_int() <= 0) {
+		return;
+	}
+	hitch_threshold_ms = env.to_int();
+	hitch_main_thread = pthread_self();
+	hitch_all_threads = OS::get_singleton()->get_environment("GODOT_HITCH_ALL_THREADS") == "1";
+
+	// Warm up backtrace() outside the signal handler so it doesn't dlopen on first use inside one.
+	void *warm[4];
+	backtrace(warm, 4);
+
+	struct sigaction action = {};
+	action.sa_handler = hitch_signal_handler;
+	sigemptyset(&action.sa_mask);
+	action.sa_flags = SA_RESTART;
+	sigaction(SIGPROF, &action, nullptr);
+
+	hitch_thread.start(hitch_thread_func, nullptr);
+	fprintf(stderr, "[hitch] watchdog enabled, threshold %llu ms\n", (unsigned long long)hitch_threshold_ms);
+}
+
+void hitch_watchdog_stop() {
+	if (hitch_thread.is_started()) {
+		hitch_exit.store(true);
+		hitch_thread.wait_to_finish();
+	}
+}
+} //namespace
+#else
+static void hitch_watchdog_start() {}
+static void hitch_watchdog_stop() {}
+#endif
 #include "platform/register_platform_apis.h"
 
 // 2D
@@ -4019,6 +4165,8 @@ int Main::start() {
 
 	ERR_FAIL_COND_V(!_start_success, EXIT_FAILURE);
 
+	hitch_watchdog_start();
+
 	bool has_icon = false;
 	String positional_arg;
 	String game_path;
@@ -4925,6 +5073,9 @@ bool Main::iteration() {
 	GodotProfileZone("Main::iteration");
 	GodotProfileZoneGroupedFirst(_profile_zone, "prepare");
 	iterating++;
+#ifdef UNIX_ENABLED
+	hitch_iteration.fetch_add(1);
+#endif
 
 	const uint64_t ticks = OS::get_singleton()->get_ticks_usec();
 	Engine::get_singleton()->_frame_ticks = ticks;
@@ -5218,6 +5369,7 @@ void Main::force_redraw() {
  */
 void Main::cleanup(bool p_force) {
 	Thread::make_main_thread();
+	hitch_watchdog_stop();
 
 	GodotProfileZone("cleanup");
 	OS::get_singleton()->benchmark_begin_measure("Shutdown", "Main::Cleanup");

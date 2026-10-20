@@ -112,12 +112,16 @@ void JoltConcavePolygonShape3D::set_data(const Variant &p_data) {
 	const Variant maybe_back_face_collision = data.get("backface_collision", Variant());
 	ERR_FAIL_COND(maybe_back_face_collision.get_type() != Variant::BOOL);
 
+	// A background build may still be reading the old data
+	_settle_async_build();
+
 	faces = maybe_faces;
 	back_face_collision = maybe_back_face_collision;
 
 	aabb = _calculate_aabb();
 
 	destroy();
+	build_async();
 }
 
 String JoltConcavePolygonShape3D::to_string() const {

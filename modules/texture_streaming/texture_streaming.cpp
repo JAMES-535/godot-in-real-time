@@ -165,12 +165,17 @@ void TextureStreaming::_texture_configure_streaming_impl(Completion<RID> *p_comp
 void TextureStreaming::texture_remove(RID p_rid) {
 	push_and_sync("_texture_remove_impl", this, &TextureStreaming::_texture_remove_impl, p_rid);
 
-	// Wait for reloads already queued or running on the I/O thread, so the caller
-	// can't free the texture while a reload is still using it.
+	// `removing` is now set, so no new reload will start on this texture. It holds the state's reload_mutex while it touches the texture, so taking the mutex
+	// once is enough to let it finish. This used to be a barrier on the whole I/O queue, which made
+	// freeing a texture wait for every throttled reload queued ahead of it, with a few hundred of
+	// those during a zone transition, that was a multi-second stall on the main thread per unload.
 	if (texture_reload_thread.is_started() && Thread::get_caller_id() != texture_reload_thread.get_id()) {
-		CompletionVoid completion;
-		io_command_queue.push_internal("_io_barrier", this, &TextureStreaming::_io_barrier, &completion);
-		completion.wait();
+		StreamingState *state = streaming_info_owner.get_or_null(p_rid);
+		if (state) {
+			// The state itself stays alive until _texture_remove_finalize runs on the I/O thread
+			state->reload_mutex.lock();
+			state->reload_mutex.unlock();
+		}
 	}
 }
 
@@ -222,7 +227,7 @@ void TextureStreaming::_texture_request_mip_impl(RID p_state_rid, uint8_t p_mip,
 	if (!state || state->removing.load(std::memory_order_relaxed)) {
 		return;
 	}
-	
+
 	if (p_mip < state->feedback_mip) {
 		state->feedback_mip = p_mip;
 		state->requested_tick_msec = p_ticks_msec;
@@ -260,6 +265,10 @@ TextureStreaming::TextureStreaming() {
 	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "rendering/textures/streaming/memory_budget_enabled"), false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/streaming/memory_budget_mb"), 512);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/streaming/max_ops_per_second"), 200);
+	// Upload bandwidth cap. Every reload recreates the texture from the new mip down, so one op on a
+	// 4K BC7 texture is ~22 MB, counting ops alone lets a burst of those stall the GPU transfer queue
+	// and, behind it, anything on the main thread that touches the RenderingDevice. 0 = unlimited.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/streaming/max_mb_per_second", PROPERTY_HINT_RANGE, "0,4096,1,or_greater,suffix:MB/s"), 96);
 
 	// Mip level settings: 0 = full resolution (best quality), higher = lower resolution
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/streaming/min_lod", PROPERTY_HINT_RANGE, "0,13,1"), 0);
@@ -272,6 +281,7 @@ TextureStreaming::TextureStreaming() {
 	// Load initial settings.
 	setting_streaming_is_enabled = GLOBAL_GET("rendering/textures/streaming/enabled");
 	setting_max_ops_per_second = GLOBAL_GET("rendering/textures/streaming/max_ops_per_second");
+	setting_max_mb_per_second = GLOBAL_GET("rendering/textures/streaming/max_mb_per_second");
 	setting_min_lod = uint8_t(CLAMP(int(GLOBAL_GET("rendering/textures/streaming/min_lod")), 0, 13));
 	setting_max_lod = uint8_t(CLAMP(int(GLOBAL_GET("rendering/textures/streaming/max_lod")), 0, 13));
 	setting_budget_mb = GLOBAL_GET("rendering/textures/streaming/memory_budget_mb");
@@ -298,6 +308,7 @@ TextureStreaming::~TextureStreaming() {
 
 void TextureStreaming::_on_settings_changed() {
 	setting_max_ops_per_second = GLOBAL_GET("rendering/textures/streaming/max_ops_per_second");
+	setting_max_mb_per_second = GLOBAL_GET("rendering/textures/streaming/max_mb_per_second");
 	setting_min_lod = uint8_t(CLAMP(int(GLOBAL_GET("rendering/textures/streaming/min_lod")), 0, 13));
 	setting_max_lod = uint8_t(CLAMP(int(GLOBAL_GET("rendering/textures/streaming/max_lod")), 0, 13));
 	setting_budget_mb = GLOBAL_GET("rendering/textures/streaming/memory_budget_mb");
@@ -786,7 +797,7 @@ void TextureStreaming::_feedback_buffer_process(uint64_t p_ticks_msec) {
 		if (cur != candidate.target_mip) {
 			uint8_t old_pending = state->pending_reload_mip.exchange(candidate.target_mip, std::memory_order_relaxed);
 			if (old_pending == INVALID_MIP) {
-				io_command_queue.push_internal("_do_texture_reload", this, &TextureStreaming::_do_texture_reload, candidate.state_rid);
+				_queue_texture_reload(candidate.state_rid);
 			}
 		}
 	}
@@ -813,6 +824,62 @@ void TextureStreaming::_texture_reload_thread_main() {
 	}
 }
 
+void TextureStreaming::_queue_texture_reload(RID p_state_rid) {
+	{
+		MutexLock lock(reload_queue_mutex);
+		reload_queue.push_back(p_state_rid);
+	}
+	io_command_queue.push_internal("_do_next_texture_reload", this, &TextureStreaming::_do_next_texture_reload);
+}
+
+uint32_t TextureStreaming::_reload_priority(const StreamingState *p_state) {
+	// Higher = sooner. Mip 0 is full resolution, so a low target mip means the texture is large on
+	// screen (close to the camera), those go first. Among textures with the same target, the one
+	// that is furthest from it goes first. Reductions come before all improvements
+	// they are cheap and they are what keeps the budget nice.
+	const uint8_t target = p_state->fit_mip.load(std::memory_order_relaxed);
+	const uint8_t current = p_state->current_mip.load(std::memory_order_relaxed);
+	if (target == INVALID_MIP) {
+		return 0;
+	}
+	if (current == INVALID_MIP || target > current) {
+		return 1u << 20;
+	}
+	const uint32_t deficit = MIN(uint32_t(current - target), 15u);
+	return (uint32_t(16 - MIN(target, uint8_t(15))) << 4) | deficit;
+}
+
+void TextureStreaming::_do_next_texture_reload() {
+	RID best_rid;
+	{
+		MutexLock lock(reload_queue_mutex);
+		if (reload_queue.is_empty()) {
+			return;
+		}
+		uint32_t best_index = 0;
+		uint32_t best_priority = 0;
+		bool have_best = false;
+		for (uint32_t i = 0; i < reload_queue.size(); i++) {
+			const StreamingState *state = streaming_info_owner.get_or_null(reload_queue[i]);
+			if (state == nullptr || state->removing.load(std::memory_order_relaxed)) {
+				// Dead entry, process it so the queue drains.
+				best_index = i;
+				have_best = true;
+				break;
+			}
+			const uint32_t priority = _reload_priority(state);
+			if (!have_best || priority > best_priority) {
+				best_index = i;
+				best_priority = priority;
+				have_best = true;
+			}
+		}
+		best_rid = reload_queue[best_index];
+		reload_queue.remove_at_unordered(best_index);
+	}
+	_do_texture_reload(best_rid);
+}
+
 void TextureStreaming::_do_texture_reload(RID p_state_rid) {
 	StreamingState *state = streaming_info_owner.get_or_null(p_state_rid);
 	if (state == nullptr || state->removing.load(std::memory_order_relaxed)) {
@@ -835,10 +902,30 @@ void TextureStreaming::_do_texture_reload(RID p_state_rid) {
 
 	bool is_flushing = flushing_count.load(std::memory_order_relaxed) > 0;
 
-	// Throttle I/O operations to limit disk/memory bandwidth usage.
-	// Skip throttling during flush for immediate loading.
-	if (!is_flushing && setting_max_ops_per_second > 0) {
-		const uint64_t min_interval_usec = 1000000 / setting_max_ops_per_second;
+	uint8_t next_mip;
+	if (is_flushing) {
+		// During flush, jump directly to target mip level.
+		next_mip = target_mip;
+	} else if (target_mip < current) {
+		// Improving quality
+		next_mip = current - 1;
+	} else {
+		// Reducing quality
+		next_mip = current + 1; 
+	}
+
+	// Throttle I/O operations to limit disk/memory/GPU-transfer bandwidth usage, a minimum interval
+	// per op, and a longer one when the op is large (the reload uploads the whole chain from
+	// `next_mip` down). Skip throttling during flush for immediate loading.
+	if (!is_flushing && (setting_max_ops_per_second > 0 || setting_max_mb_per_second > 0)) {
+		uint64_t min_interval_usec = setting_max_ops_per_second > 0 ? 1000000 / setting_max_ops_per_second : 0;
+		if (setting_max_mb_per_second > 0 && state->format != Image::FORMAT_MAX) {
+			const int w = MAX(1, int(state->width) >> next_mip);
+			const int h = MAX(1, int(state->height) >> next_mip);
+			const uint64_t bytes = uint64_t(Image::get_image_data_size(w, h, state->format, true));
+			const uint64_t bytes_interval_usec = (bytes * 1000000ULL) / (uint64_t(setting_max_mb_per_second) * 1024ULL * 1024ULL);
+			min_interval_usec = MAX(min_interval_usec, bytes_interval_usec);
+		}
 		if (min_interval_usec > 0) {
 			const uint64_t sleep_threshold_usec = 2000;
 			next_io_op_ticks += min_interval_usec;
@@ -855,19 +942,17 @@ void TextureStreaming::_do_texture_reload(RID p_state_rid) {
 		}
 	}
 
-	uint8_t next_mip;
-	if (is_flushing) {
-		// During flush, jump directly to target mip level.
-		next_mip = target_mip;
-	} else if (target_mip < current) {
-		next_mip = current - 1; // Improving quality.
-	} else {
-		next_mip = current + 1; // Reducing quality.
+	// Perform the actual texture reload at the new mip level. Hold the states reload_mutex for the
+	// part that touches the texture object, and recheck `removing` under i,: texture_remove() sets
+	// the flag and then takes this mutex, so after it returns nothing here can touch a freed texture.
+	{
+		MutexLock reload_lock(state->reload_mutex);
+		if (state->removing.load(std::memory_order_relaxed)) {
+			return;
+		}
+		state->reload_callable.call(next_mip);
+		state->current_mip.store(next_mip, std::memory_order_relaxed);
 	}
-
-	// Perform the actual texture reload at the new mip level.
-	state->reload_callable.call(next_mip);
-	state->current_mip.store(next_mip, std::memory_order_relaxed);
 
 	// If we haven't reached the target yet, requeue to keep stepping.
 	// Re-read fit_mip in case the processing thread updated it since we started.
@@ -875,7 +960,7 @@ void TextureStreaming::_do_texture_reload(RID p_state_rid) {
 	if (!state->removing.load(std::memory_order_relaxed) && next_mip != current_target) {
 		uint8_t expected = INVALID_MIP;
 		if (state->pending_reload_mip.compare_exchange_strong(expected, current_target, std::memory_order_relaxed)) {
-			io_command_queue.push_internal("_do_texture_reload", this, &TextureStreaming::_do_texture_reload, p_state_rid);
+			_queue_texture_reload(p_state_rid);
 		}
 	}
 }

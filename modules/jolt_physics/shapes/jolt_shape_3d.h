@@ -32,6 +32,7 @@
 
 #include "core/math/aabb.h"
 #include "core/os/mutex.h"
+#include "core/os/semaphore.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/rid.h"
 #include "core/variant/variant.h"
@@ -44,11 +45,32 @@
 class JoltShapedObject3D;
 
 class JoltShape3D {
+public:
+	// Jobs are processed one at a time by a single low priority builder thread.
+	// The job outlives whichever side finishes last, so the builder never dereferences a freed shape.
+	struct AsyncBuild {
+		Mutex mutex;
+		// Cleared on cancel and on finished.
+		JoltShape3D *shape = nullptr;
+		bool running = false;
+		bool finished = false;
+		Semaphore finished_sem;
+	};
+
+	// Called by JoltPhysicsServer3D::init() / finish()
+	static void start_builder_thread();
+	static void stop_builder_thread();
+
 protected:
 	HashMap<JoltShapedObject3D *, int> ref_counts_by_owner;
 	Mutex jolt_ref_mutex;
 	RID rid;
 	JPH::ShapeRefC jolt_ref;
+
+	AsyncBuild *async_build = nullptr;
+
+	static void _builder_thread_func(void *p_unused);
+	void _settle_async_build();
 
 	virtual JPH::ShapeRefC _build() const = 0;
 
@@ -81,6 +103,13 @@ public:
 	void set_solver_bias(float p_bias);
 
 	JPH::ShapeRefC try_build();
+
+	// Queues _build() on the builder thread so the expensive part is already done when a body using this shape enters a space on the main thread.
+	void build_async();
+
+	// Waits for a running background build or cancels a queued one. Derived classes MUST call this
+	// from their destructor: their members (the data a running build reads) are destroyed before ~JoltShape3D runs.
+	void join_async_build() { _settle_async_build(); }
 
 	void destroy();
 

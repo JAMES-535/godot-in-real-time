@@ -2456,10 +2456,18 @@ void MaterialStorage::_update_queued_materials() {
 		}
 	}
 
+	SelfList<Material>::List deferred;
 	while (SelfList<Material> *E = copy.first()) {
 		Material *material = E->self();
 		copy.remove(E);
 		bool uniforms_changed = false;
+
+		if (material->data && !material->data->is_shader_ready()) {
+			// The shader is still being compiled. Updating now would block
+			// the render thread until the compilation finishes, try again next frame instead.
+			deferred.add(E);
+			continue;
+		}
 
 		if (material->data) {
 			uniforms_changed = material->data->update_parameters(material->params, material->uniform_dirty, material->texture_dirty);
@@ -2470,6 +2478,14 @@ void MaterialStorage::_update_queued_materials() {
 		if (uniforms_changed) {
 			//some implementations such as 3D renderer cache the material uniform set, so update is required
 			material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+		}
+	}
+
+	if (deferred.first()) {
+		MutexLock lock(material_update_list_mutex);
+		while (SelfList<Material> *E = deferred.first()) {
+			deferred.remove(E);
+			material_update_list.add(E);
 		}
 	}
 }
