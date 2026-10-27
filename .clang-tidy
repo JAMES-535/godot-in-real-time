@@ -3,17 +3,17 @@
 
 Checks:
   - -*
-  - performance-move-const-arg
   - bugprone-use-after-move
   - modernize-deprecated-headers
   - modernize-redundant-void-arg
   - modernize-use-bool-literals
-#  - modernize-use-default-member-init # TODO Re-activate
+  - modernize-use-default-member-init
   - modernize-use-nullptr
+  - performance-move-const-arg
   - readability-braces-around-statements
   - readability-identifier-naming
-  - readability-redundant-member-init
   - readability-operators-representation
+  - readability-redundant-member-init
 HeaderFileExtensions: ["", h, hh, hpp, hxx, inc, glsl]
 ImplementationFileExtensions: [c, cc, cpp, cxx, m, mm, java]
 HeaderFilterRegex: (core|doc|drivers|editor|main|modules|platform|scene|servers|tests)/
@@ -24,7 +24,7 @@ CheckOptions:
   modernize-use-default-member-init.IgnoreMacros: false
   modernize-use-default-member-init.UseAssignment: true
   readability-identifier-naming.ParameterCase: lower_case
-  readability-identifier-naming.ParameterIgnoredRegexp: ^rp?_[^A-Z]*
+  readability-identifier-naming.ParameterIgnoredRegexp: ^r_[a-z0-9_]*[a-z0-9]$
   readability-identifier-naming.ParameterPrefix: p_
   readability-operators-representation.BinaryOperators: "&&;&=;&;|;~;!;!=;||;|=;^;^="
   readability-operators-representation.OverloadedOperators: "&&;&=;&;|;~;!;!=;||;|=;^;^="

@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/math/dynamic_bvh.h"
+#include "editor/docks/editor_dock.h"
 #include "editor/plugins/editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 #include "scene/debugger/view_3d_controller.h"
@@ -62,8 +63,8 @@ class VSeparator;
 class VSplitContainer;
 class WorldEnvironment;
 
-class Node3DEditor : public VBoxContainer {
-	GDCLASS(Node3DEditor, VBoxContainer);
+class Node3DEditor : public EditorDock {
+	GDCLASS(Node3DEditor, EditorDock);
 
 public:
 	static const unsigned int VIEWPORTS_COUNT = 4;
@@ -142,6 +143,7 @@ private:
 	bool current_hover_gizmo_handle_secondary;
 
 	DynamicBVH gizmo_bvh;
+	bool gizmo_bvh_needs_optimization = true;
 
 	real_t snap_translate_value = 0;
 	real_t snap_rotate_value = 0;
@@ -564,7 +566,7 @@ class Node3DEditorPlugin : public EditorPlugin {
 
 public:
 	Node3DEditor *get_spatial_editor() { return spatial_editor; }
-	virtual String get_plugin_name() const override { return TTRC("3D"); }
+	virtual String get_plugin_name() const override { return "3D"; }
 	bool has_main_screen() const override { return true; }
 	virtual void make_visible(bool p_visible) override;
 	virtual void edit(Object *p_object) override;

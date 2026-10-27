@@ -2830,11 +2830,15 @@ Error Image::save_jpg(const String &p_path, float p_quality) const {
 }
 
 Vector<uint8_t> Image::save_png_to_buffer() const {
+	return _save_png_to_buffer();
+}
+
+Vector<uint8_t> Image::_save_png_to_buffer(bool p_fast) const {
 	if (save_png_buffer_func == nullptr) {
 		return Vector<uint8_t>();
 	}
 
-	return save_png_buffer_func(Ref<Image>((Image *)this));
+	return save_png_buffer_func(Ref<Image>((Image *)this), p_fast);
 }
 
 Vector<uint8_t> Image::save_jpg_to_buffer(float p_quality) const {
@@ -4484,7 +4488,7 @@ Error Image::load_exr_from_buffer(const Vector<uint8_t> &p_array) {
 	ERR_FAIL_NULL_V_MSG(
 			_exr_mem_loader_func,
 			ERR_UNAVAILABLE,
-			"The TinyEXR module isn't enabled. Recompile the Godot editor or export template binary with the `tinyexr_export_templates=yes` SCons option.");
+			"The TinyEXR module isn't enabled. Recompile the Godot editor or export template binary with the `module_tinyexr_enabled=yes` SCons option.");
 	return _load_from_buffer(p_array, _exr_mem_loader_func);
 }
 

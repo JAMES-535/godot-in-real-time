@@ -129,6 +129,7 @@ public:
 				uint32_t multimesh_has_custom_data : 1;
 				uint32_t fog_use_legacy_blending : 1;
 				uint32_t cluster_has_area_light : 1;
+				uint32_t use_lightmap_specular : 1;
 				uint32_t material_feedback : 1;
 			};
 		};
@@ -315,7 +316,7 @@ public:
 		uint64_t get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader);
 		RD::PolygonCullMode get_cull_mode_from_cull_variant(CullVariant p_cull_variant);
 		bool is_valid() const;
-		// Nonblocking, false while the shader is still compiling
+		// Non-blocking: false while the shader is still compiling (is_valid() would wait for it).
 		bool is_ready() const;
 
 		SelfList<ShaderData> shader_list_element;

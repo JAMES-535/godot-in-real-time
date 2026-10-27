@@ -34,7 +34,6 @@
 #include "gdscript_cache.h"
 #include "gdscript_compiler.h"
 #include "gdscript_parser.h"
-#include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_warning.h"
 
@@ -78,7 +77,7 @@ bool GDScriptNativeClass::_get(const StringName &p_name, Variant &r_ret) const {
 		return true;
 	}
 
-	MethodBind *method = ClassDB::get_method(name, p_name);
+	const MethodBind *method = ClassDB::get_method(name, p_name);
 	if (method && method->is_static()) {
 		// Native static method.
 		r_ret = Callable(this, p_name);
@@ -114,7 +113,7 @@ Variant GDScriptNativeClass::callp(const StringName &p_method, const Variant **p
 		return Object::callp(p_method, p_args, p_argcount, r_error);
 	}
 
-	MethodBind *method = ClassDB::get_method(name, p_method);
+	const MethodBind *method = ClassDB::get_method(name, p_method);
 	if (method && method->is_static()) {
 		// Native static method.
 		return method->call(nullptr, p_args, p_argcount, r_error);
@@ -161,12 +160,6 @@ GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argco
 	instance->script = Ref<GDScript>(this);
 	instance->owner = p_owner;
 	instance->owner_id = p_owner->get_instance_id();
-#ifdef DEBUG_ENABLED
-	//needed for hot reloading
-	for (const KeyValue<StringName, MemberInfo> &E : member_indices) {
-		instance->member_indices_cache[E.key] = E.value.index;
-	}
-#endif
 	instance->owner->set_script_instance(instance);
 
 	/* STEP 2, INITIALIZE AND CONSTRUCT */
@@ -561,9 +554,7 @@ bool GDScript::_update_exports(bool *r_err, bool p_recursive_call, PlaceHolderSc
 
 			members_cache.push_back(get_class_category());
 
-			for (int i = 0; i < c->members.size(); i++) {
-				const GDScriptParser::ClassNode::Member &member = c->members[i];
-
+			for (const GDScriptParser::ClassNode::Member &member : c->members) {
 				switch (member.type) {
 					case GDScriptParser::ClassNode::Member::VARIABLE: {
 						if (!member.variable->exported) {
@@ -1007,11 +998,7 @@ bool GDScript::_get(const StringName &p_name, Variant &r_ret) const {
 		if (likely(top->valid)) {
 			HashMap<StringName, GDScriptFunction *>::ConstIterator E = top->member_functions.find(p_name);
 			if (E && E->value->is_static()) {
-				if (top->rpc_config.has(p_name)) {
-					r_ret = Callable(memnew(GDScriptRPCCallable(const_cast<GDScript *>(top), E->key)));
-				} else {
-					r_ret = Callable(const_cast<GDScript *>(top), E->key);
-				}
+				r_ret = Callable(const_cast<GDScript *>(top), E->key);
 				return true;
 			}
 		}
@@ -1674,11 +1661,7 @@ bool GDScriptInstance::get(const StringName &p_name, Variant &r_ret) const {
 		if (likely(sptr->valid)) {
 			HashMap<StringName, GDScriptFunction *>::ConstIterator E = sptr->member_functions.find(p_name);
 			if (E) {
-				if (sptr->rpc_config.has(p_name)) {
-					r_ret = Callable(memnew(GDScriptRPCCallable(owner, E->key)));
-				} else {
-					r_ret = Callable(owner, E->key);
-				}
+				r_ret = Callable(owner, E->key);
 				return true;
 			}
 		}
@@ -1735,7 +1718,7 @@ void GDScriptInstance::validate_property(PropertyInfo &p_property) const {
 				const Variant *args[1] = { &property };
 
 				Callable::CallError err;
-				Variant ret = E->value->call(const_cast<GDScriptInstance *>(this), args, 1, err);
+				E->value->call(const_cast<GDScriptInstance *>(this), args, 1, err);
 				if (err.error == Callable::CallError::CALL_OK) {
 					p_property = PropertyInfo::from_dict(property);
 					return;
@@ -2061,18 +2044,13 @@ void GDScriptInstance::reload_members() {
 
 	// Transfer the old members into their new position.
 	for (KeyValue<StringName, GDScript::MemberInfo> &E : script->member_indices) {
-		if (member_indices_cache.has(E.key)) {
-			Variant value = members[member_indices_cache[E.key]];
+		const GDScript::MemberInfo *old = script->old_member_indices.getptr(E.key);
+		if (old != nullptr) {
+			Variant value = members[old->index];
 			new_members[E.value.index] = value;
 		}
 	}
 	members = std::move(new_members);
-
-	// Cache the new indices.
-	member_indices_cache.clear();
-	for (const KeyValue<StringName, GDScript::MemberInfo> &E : script->member_indices) {
-		member_indices_cache[E.key] = E.value.index;
-	}
 
 #endif
 }
@@ -2272,7 +2250,13 @@ void GDScriptLanguage::finish() {
 			while (script->instances.first() != nullptr) {
 				// Turns instances into core objects that can outlive `GDScriptLanguage`.
 				const SelfList<GDScriptInstance> *elem = script->instances.first();
+
+				// In case the last reference to the owner comes from the script instance itself, we need to ensure that `set_script` can finish cleanly, before destructing the owner.
+				Variant owner = elem->self()->get_owner();
+				std::ignore = owner; // Suppress unused warnings, holding the reference is the point.
+
 				elem->self()->get_owner()->set_script(Variant());
+
 				ERR_BREAK_MSG(script->instances.first() == elem, "GDScript bug (please report): Detaching a script does not destruct instance.");
 			}
 		}
@@ -2502,11 +2486,11 @@ void GDScriptLanguage::reload_all_scripts() {
 #endif // TOOLS_ENABLED
 	}
 
-	reload_scripts(scripts, true);
+	reload_scripts(scripts);
 #endif // DEBUG_ENABLED
 }
 
-void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload) {
+void GDScriptLanguage::reload_scripts(const Array &p_scripts) {
 #ifdef DEBUG_ENABLED
 
 	List<Ref<GDScript>> scripts;
@@ -2539,44 +2523,6 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 		}
 
 		to_reload.insert(scr, HashMap<ObjectID, List<Pair<StringName, Variant>>>());
-
-		if (!p_soft_reload) {
-			//save state and remove script from instances
-			HashMap<ObjectID, List<Pair<StringName, Variant>>> &map = to_reload[scr];
-
-			while (scr->instances.first()) {
-				GDScriptInstance *instance = scr->instances.first()->self();
-				//save instance info
-				List<Pair<StringName, Variant>> state;
-				instance->get_property_state(state);
-				map[instance->get_owner()->get_instance_id()] = state;
-				instance->get_owner()->set_script(Variant());
-			}
-
-			//same thing for placeholders
-#ifdef TOOLS_ENABLED
-
-			while (scr->placeholders.size()) {
-				Object *obj = (*scr->placeholders.begin())->get_owner();
-
-				//save instance info
-				if (obj->get_script_instance()) {
-					map.insert(obj->get_instance_id(), List<Pair<StringName, Variant>>());
-					List<Pair<StringName, Variant>> &state = map[obj->get_instance_id()];
-					obj->get_script_instance()->get_property_state(state);
-					obj->set_script(Variant());
-				} else {
-					// no instance found. Let's remove it so we don't loop forever
-					scr->placeholders.erase(*scr->placeholders.begin());
-				}
-			}
-
-#endif // TOOLS_ENABLED
-
-			for (const KeyValue<ObjectID, List<Pair<StringName, Variant>>> &F : scr->pending_reload_state) {
-				map[F.key] = F.value; //pending to reload, use this one instead
-			}
-		}
 	}
 
 	for (KeyValue<Ref<GDScript>, HashMap<ObjectID, List<Pair<StringName, Variant>>>> &E : to_reload) {
@@ -2595,7 +2541,7 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 		} else {
 			scr->load_source_code(scr->get_path());
 		}
-		scr->reload(p_soft_reload);
+		scr->reload(true);
 
 		//restore state if saved
 		for (KeyValue<ObjectID, List<Pair<StringName, Variant>>> &F : E.value) {
@@ -2606,10 +2552,6 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 				continue;
 			}
 
-			if (!p_soft_reload) {
-				//clear it just in case (may be a pending reload state)
-				obj->set_script(Variant());
-			}
 			obj->set_script(scr);
 
 			ScriptInstance *script_inst = obj->get_script_instance();
@@ -2642,9 +2584,9 @@ void GDScriptLanguage::reload_scripts(const Array &p_scripts, bool p_soft_reload
 #endif // DEBUG_ENABLED
 }
 
-void GDScriptLanguage::reload_tool_script(const Ref<Script> &p_script, bool p_soft_reload) {
+void GDScriptLanguage::reload_tool_script(const Ref<Script> &p_script) {
 	Array scripts = { p_script };
-	reload_scripts(scripts, p_soft_reload);
+	reload_scripts(scripts);
 }
 
 void GDScriptLanguage::frame() {
@@ -2827,7 +2769,7 @@ String GDScriptLanguage::_get_global_class_name(const String &p_path, String *r_
 
 						while (extend_classes.size() > 0) {
 							bool found = false;
-							for (int i = 0; i < subclass->members.size(); i++) {
+							for (uint32_t i = 0; i < subclass->members.size(); i++) {
 								if (subclass->members[i].type != GDScriptParser::ClassNode::Member::CLASS) {
 									continue;
 								}

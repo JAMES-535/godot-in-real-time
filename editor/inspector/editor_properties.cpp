@@ -153,6 +153,9 @@ void EditorPropertyVariant::update_property() {
 		}
 		ERR_FAIL_NULL(sub_property);
 
+		// Doesn't affect foldable property types, since they don't start with a bottom editor.
+		set_bottom_editor(sub_property->get_bottom_editor() ? content : nullptr);
+
 		sub_property->set_object_and_property(get_edited_object(), get_edited_property());
 		sub_property->set_name_split_ratio(0);
 		sub_property->set_selectable(false);
@@ -3017,7 +3020,6 @@ EditorPropertyColor::EditorPropertyColor() {
 
 void EditorPropertyNodePath::_set_read_only(bool p_read_only) {
 	assign->set_disabled(p_read_only);
-	menu->set_disabled(p_read_only);
 }
 
 Variant EditorPropertyNodePath::_get_cache_value(const StringName &p_prop, bool &r_valid) const {
@@ -3038,8 +3040,14 @@ void EditorPropertyNodePath::_node_selected(const NodePath &p_path, bool p_absol
 		path = get_tree()->get_edited_scene_root()->get_path_to(to_node);
 	}
 
-	if (p_absolute && base_node) { // for AnimationTrackKeyEdit
-		path = base_node->get_path().rel_path_to(p_path);
+	if (base_node) {
+		if (p_absolute) { // For AnimationTrackKeyEdit.
+			path = base_node->get_path().rel_path_to(p_path);
+		} else {
+			path = p_path;
+		}
+		Node *to_node = base_node->get_node_or_null(path);
+		ERR_FAIL_NULL_EDMSG(to_node, vformat(TTR("Invalid node path \"%s\" (relative to %s)."), path, base_node->get_name()));
 	}
 
 	if (editing_node) {
@@ -3084,8 +3092,9 @@ void EditorPropertyNodePath::_assign_draw() {
 void EditorPropertyNodePath::_update_menu() {
 	const NodePath &np = _get_node_path();
 
-	menu->get_popup()->set_item_disabled(ACTION_CLEAR, np.is_empty());
+	menu->get_popup()->set_item_disabled(ACTION_CLEAR, np.is_empty() || is_read_only());
 	menu->get_popup()->set_item_disabled(ACTION_COPY, np.is_empty());
+	menu->get_popup()->set_item_disabled(ACTION_EDIT, is_read_only());
 
 	Node *edited_node = Object::cast_to<Node>(get_edited_object());
 	menu->get_popup()->set_item_disabled(ACTION_SELECT, !edited_node || !edited_node->has_node(np));
@@ -3666,6 +3675,10 @@ void EditorPropertyResource::setup(Object *p_object, const String &p_path, const
 	}
 }
 
+void EditorPropertyResource::make_passthrough(bool p_passthrough) {
+	resource_picker->make_passthrough(p_passthrough);
+}
+
 void EditorPropertyResource::update_property() {
 	Ref<Resource> res = get_edited_property_display_value();
 
@@ -3774,6 +3787,13 @@ void EditorPropertyResource::set_use_filter(bool p_use) {
 	use_filter = p_use;
 	if (sub_inspector) {
 		update_property();
+	}
+}
+
+void EditorPropertyResource::update_properties_recursive() {
+	update_property();
+	if (sub_inspector) {
+		sub_inspector->update_properties_recursive();
 	}
 }
 

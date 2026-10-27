@@ -772,6 +772,7 @@ protected:
 	static void _bind_methods();
 
 public:
+	virtual void make_passthrough(bool p_passthrough) override;
 	virtual void update_property() override;
 	void setup(Object *p_object, const String &p_path, const String &p_base_type);
 	EditorResourcePicker *get_resource_picker() const { return resource_picker; }
@@ -782,6 +783,7 @@ public:
 
 	void set_use_sub_inspector(bool p_enable);
 	void set_use_filter(bool p_use);
+	void update_properties_recursive() override;
 	void fold_resource();
 
 	virtual void set_keying(bool p_keying) override;

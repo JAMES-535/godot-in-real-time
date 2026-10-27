@@ -383,6 +383,10 @@ void EditorPropertyArray::set_preview_value(bool p_preview_value) {
 	preview_value = p_preview_value;
 }
 
+void EditorPropertyArray::make_passthrough(bool p_passthrough) {
+	edit->set_mouse_filter(p_passthrough ? MOUSE_FILTER_PASS : MOUSE_FILTER_STOP);
+}
+
 void EditorPropertyArray::update_property() {
 	Variant array = get_edited_property_value();
 
@@ -563,6 +567,10 @@ void EditorPropertyArray::update_property() {
 					new_prop->add_inline_control(slot.remove_button, INLINE_CONTROL_RIGHT);
 				}
 
+				// Move the right container to be the last child, so that focusing on the next Control behaves in the expected order.
+				Control *right_cont = new_prop->get_inline_container(INLINE_CONTROL_RIGHT);
+				right_cont->get_parent()->move_child(right_cont, new_prop->get_child_count() - 1);
+
 				slot.prop->add_sibling(new_prop, false);
 				slot.prop->queue_free();
 				slot.prop = new_prop;
@@ -587,6 +595,14 @@ void EditorPropertyArray::update_property() {
 			button_add_item = nullptr;
 			container = nullptr;
 			slots.clear();
+		}
+	}
+}
+
+void EditorPropertyArray::update_properties_recursive() {
+	for (const Slot &slot : slots) {
+		if (slot.prop) {
+			slot.prop->update_properties_recursive();
 		}
 	}
 }
@@ -1252,6 +1268,10 @@ void EditorPropertyDictionary::set_preview_value(bool p_preview_value) {
 	preview_value = p_preview_value;
 }
 
+void EditorPropertyDictionary::make_passthrough(bool p_passthrough) {
+	edit->set_mouse_filter(p_passthrough ? Control::MOUSE_FILTER_PASS : Control::MOUSE_FILTER_STOP);
+}
+
 void EditorPropertyDictionary::update_property() {
 	Variant updated_val = get_edited_property_value();
 
@@ -1414,9 +1434,8 @@ void EditorPropertyDictionary::update_property() {
 					new_prop->set_draw_background(false);
 					new_prop->set_use_folding(is_using_folding());
 					new_prop->set_h_size_flags(SIZE_EXPAND_FILL);
+					new_prop->make_passthrough(true);
 					new_prop->set_draw_label(false);
-					new_prop->set_mouse_filter(MOUSE_FILTER_PASS);
-					new_prop->set_mouse_behavior_recursive(MOUSE_BEHAVIOR_DISABLED);
 					EditorPropertyArray *arr_prop = Object::cast_to<EditorPropertyArray>(new_prop);
 					if (arr_prop) {
 						arr_prop->set_preview_value(true);
@@ -1481,6 +1500,10 @@ void EditorPropertyDictionary::update_property() {
 					new_prop->add_inline_control(slot.prop_key, INLINE_CONTROL_LEFT);
 				}
 
+				// Move the right container to be the last child, so that focusing on the next Control behaves in the expected order.
+				Control *right_cont = new_prop->get_inline_container(INLINE_CONTROL_RIGHT);
+				right_cont->get_parent()->move_child(right_cont, new_prop->get_child_count() - 1);
+
 				slot.set_prop(new_prop);
 
 			} else if (slot.index != EditorPropertyDictionaryObject::NEW_KEY_INDEX && slot.index != EditorPropertyDictionaryObject::NEW_VALUE_INDEX) {
@@ -1511,6 +1534,17 @@ void EditorPropertyDictionary::update_property() {
 			container = nullptr;
 			add_panel = nullptr;
 			slots.clear();
+		}
+	}
+}
+
+void EditorPropertyDictionary::update_properties_recursive() {
+	for (const Slot &slot : slots) {
+		if (slot.prop) {
+			slot.prop->update_properties_recursive();
+		}
+		if (slot.prop_key) {
+			slot.prop_key->update_properties_recursive();
 		}
 	}
 }
@@ -1710,11 +1744,9 @@ void EditorPropertyLocalizableString::update_property() {
 		for (int i = 0; i < amount; i++) {
 			String prop_name;
 			Variant key;
-			Variant value;
 
 			prop_name = "indices/" + itos(i + offset);
 			key = dict.get_key_at_index(i + offset);
-			value = dict.get_value_at_index(i + offset);
 
 			EditorProperty *prop = memnew(EditorPropertyText);
 

@@ -52,7 +52,12 @@ Size2 ScrollContainer::_get_minimum_size(bool p_use_desired_sizes) const {
 		}
 
 		Size2 child_min_size = p_use_desired_sizes ? c->get_bound_desired_size() : c->get_bound_minimum_size();
-		largest_child_min_size = largest_child_min_size.max(child_min_size);
+		Size2 child_max_size = c->get_custom_maximum_size();
+
+		real_t width = (child_max_size.width >= 0 && c->get_h_size_flags().has_flag(SIZE_MAXIMIZE)) ? child_max_size.width : child_min_size.width;
+		real_t height = (child_max_size.height >= 0 && c->get_v_size_flags().has_flag(SIZE_MAXIMIZE)) ? child_max_size.height : child_min_size.height;
+
+		largest_child_min_size = largest_child_min_size.max(Size2(width, height));
 	}
 
 	Size2 min_size;
@@ -617,7 +622,11 @@ void ScrollContainer::_notification(int p_what) {
 
 		case NOTIFICATION_DRAG_BEGIN: {
 			if (scroll_on_drag_hover && is_visible_in_tree()) {
-				set_process_internal(true);
+				const Dictionary drag_data = get_viewport()->gui_get_drag_data();
+				// Enable scrolling, unless dragging a tab.
+				if (drag_data.get("type", "").operator String() != "tab") {
+					set_process_internal(true);
+				}
 			}
 		} break;
 

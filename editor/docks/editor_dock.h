@@ -45,6 +45,7 @@ public:
 		DOCK_LAYOUT_VERTICAL = 1,
 		DOCK_LAYOUT_HORIZONTAL = 2,
 		DOCK_LAYOUT_FLOATING = 4,
+		DOCK_LAYOUT_MAIN_SCREEN = 8,
 		DOCK_LAYOUT_ALL = DOCK_LAYOUT_VERTICAL | DOCK_LAYOUT_HORIZONTAL | DOCK_LAYOUT_FLOATING,
 	};
 
@@ -61,6 +62,7 @@ public:
 		DOCK_SLOT_BOTTOM,
 		DOCK_SLOT_BOTTOM_L,
 		DOCK_SLOT_BOTTOM_R,
+		DOCK_SLOT_MAIN_SCREEN,
 		DOCK_SLOT_MAX
 	};
 
@@ -114,7 +116,7 @@ protected:
 public:
 	void open();
 	void make_visible();
-	void make_floating();
+	void make_floating(int p_screen = -1);
 	void close();
 
 	void set_title(const String &p_title);

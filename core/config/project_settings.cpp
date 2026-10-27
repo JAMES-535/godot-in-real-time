@@ -645,8 +645,20 @@ void ProjectSettings::_convert_to_last_version(int p_from_version) {
 			set_setting("application/boot_splash/fullsize", Variant());
 		}
 	}
+	// Automatically adds overrides for project settings that were changed to editor settings.
+	_handle_editor_setting_compat("editor/script/search_in_file_extensions", "text_editor/behavior/general/find_in_file_extensions");
 #endif // DISABLE_DEPRECATED
 }
+
+#ifndef DISABLE_DEPRECATED
+void ProjectSettings::_handle_editor_setting_compat(const String &p_original_setting, const String &p_new_setting) {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (ps->has_setting(p_original_setting)) {
+		ps->set_editor_setting_override(p_new_setting, ps->get_setting(p_original_setting));
+		ps->set_setting(p_original_setting, Variant());
+	}
+}
+#endif
 
 /*
  * This method is responsible for loading a project.godot file and/or data file
@@ -1185,7 +1197,7 @@ Error ProjectSettings::_save_settings_text(const String &p_file, const RBMap<Str
 			}
 
 			String vstr;
-			VariantWriter::write_to_string(value, vstr);
+			VariantWriter::write_to_string(value, vstr, true);
 			file->store_string(F.property_name_encode() + "=" + vstr + "\n");
 		}
 	}
@@ -1860,6 +1872,7 @@ ProjectSettings::ProjectSettings() {
 	GLOBAL_DEF_INTERNAL("internationalization/locale/translations", PackedStringArray());
 	GLOBAL_DEF_INTERNAL("internationalization/locale/translations_pot_files", PackedStringArray());
 	GLOBAL_DEF_INTERNAL("internationalization/locale/translation_add_builtin_strings_to_pot", false);
+	GLOBAL_DEF_INTERNAL("internationalization/locale/translation_add_project_title_to_translation_template", false);
 
 #if !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
 	GLOBAL_DEF("navigation/world/map_use_async_iterations", true);

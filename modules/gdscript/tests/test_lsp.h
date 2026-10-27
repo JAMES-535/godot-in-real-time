@@ -42,10 +42,9 @@
 #include "gdscript_test_runner.h"
 
 #include "core/io/dir_access.h"
+#include "core/string/regex.h"
 #include "editor/file_system/editor_file_system.h"
 #include "tests/test_macros.h"
-
-#include "modules/regex/regex.h"
 
 #include <thirdparty/doctest/doctest.h>
 
@@ -102,7 +101,7 @@ GDScriptLanguageProtocol *initialize(const String &p_root) {
 	init_language(absolute_root);
 
 	// Recreate the singleton for each test, to ensure a clean state.
-	memdelete_notnull(GDScriptLanguageProtocol::get_singleton());
+	memdelete(GDScriptLanguageProtocol::get_singleton());
 	GDScriptLanguageProtocol *proto = memnew(GDScriptLanguageProtocol);
 	TestGDScriptLanguageProtocolInitializer::setup_client();
 

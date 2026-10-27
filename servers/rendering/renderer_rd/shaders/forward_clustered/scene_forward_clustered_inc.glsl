@@ -146,8 +146,12 @@ bool sc_cluster_has_area_light() {
 	return ((sc_packed_1() >> 5) & 1U) != 0;
 }
 
-bool sc_material_feedback() {
+bool sc_use_lightmap_specular() {
 	return ((sc_packed_1() >> 6) & 1U) != 0;
+}
+
+bool sc_material_feedback() {
+	return ((sc_packed_1() >> 7) & 1U) != 0;
 }
 
 float sc_luminance_multiplier() {
@@ -232,7 +236,7 @@ directional_lights;
 #define LIGHTMAP_SHADOWMASK_MODE_ONLY 3
 
 struct Lightmap {
-	mat3 normal_xform;
+	mat3x4 normal_xform_and_specular_intensity; // "normal_xform" is the 3x3 matrix. "specular_intensity" is the 4th row of the 1st column.
 	vec2 light_texture_size;
 	float exposure_normalization;
 	uint flags;
@@ -308,9 +312,9 @@ layout(set = 0, binding = 16) uniform texture2D best_fit_normal_texture;
 
 layout(set = 0, binding = 17) uniform texture2D dfg;
 
-layout(set = 0, binding = 18) uniform sampler2D ltc_lut1;
+layout(set = 0, binding = 18) uniform texture2D ltc_lut1;
 
-layout(set = 0, binding = 19) uniform sampler2D ltc_lut2;
+layout(set = 0, binding = 19) uniform texture2D ltc_lut2;
 
 layout(set = 0, binding = 20) uniform texture2D area_light_atlas;
 /* Set 1: Render Pass (changes per render pass) */

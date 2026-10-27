@@ -1443,7 +1443,11 @@ void Variant::_clear_internal() {
 			reinterpret_cast<NodePath *>(_data._mem)->~NodePath();
 		} break;
 		case OBJECT: {
-			_get_obj().unref();
+			// Mirrors ObjData::unref
+			const ObjData &objdata = _get_obj();
+			if (objdata.id.is_ref_counted() && static_cast<RefCounted *>(objdata.obj)->unreference()) {
+				memdelete(objdata.obj);
+			}
 		} break;
 		case RID: {
 			// Not much need probably.
@@ -2534,8 +2538,12 @@ Variant::Variant(const ::RID &p_rid) :
 
 Variant::Variant(const Object *p_object) :
 		type(OBJECT) {
-	_get_obj() = ObjData();
-	_get_obj().ref_pointer(const_cast<Object *>(p_object));
+	// Mirrors ObjData::ref_pointer(Object *) but without the cleanup
+	if (p_object && (!p_object->is_ref_counted() || static_cast<RefCounted *>(const_cast<Object *>(p_object))->init_ref())) {
+		memnew_placement(_data._mem, ObjData({ p_object->get_instance_id(), const_cast<Object *>(p_object) }));
+	} else {
+		memnew_placement(_data._mem, ObjData());
+	}
 }
 
 Variant::Variant(const Callable &p_callable) :
@@ -3526,7 +3534,7 @@ void Variant::construct_from_string(const String &p_string, Variant &r_value, Ob
 
 String Variant::get_construct_string() const {
 	String vars;
-	VariantWriter::write_to_string(*this, vars);
+	VariantWriter::write_to_string(*this, vars, false);
 
 	return vars;
 }

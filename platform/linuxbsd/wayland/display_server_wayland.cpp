@@ -1530,10 +1530,9 @@ void DisplayServerWayland::window_start_resize(DisplayServerEnums::WindowResizeE
 }
 
 void DisplayServerWayland::_window_update_hdr_state(WindowData &p_window) {
-	DisplayServerEnums::WindowID window_id = p_window.id;
-
 #if defined(RD_ENABLED)
 	if (rendering_context) {
+		DisplayServerEnums::WindowID window_id = p_window.id;
 		// The `display/window/hdr/request_hdr_output` project setting makes the main window "request" HDR.
 		// On Windows, this means enable HDR for the main window if it is on an HDR screen.
 		// Since all screens support HDR on Wayland, we use whether the window "prefers" HDR or not instead.
@@ -2599,31 +2598,18 @@ DisplayServerWayland::~DisplayServerWayland() {
 
 	// Destroy all drivers.
 #ifdef RD_ENABLED
-	if (rendering_device) {
-		memdelete(rendering_device);
-	}
-
-	if (rendering_context) {
-		memdelete(rendering_context);
-	}
+	memdelete(rendering_device);
+	memdelete(rendering_context);
 #endif
 
 #ifdef SPEECHD_ENABLED
-	if (tts) {
-		memdelete(tts);
-	}
+	memdelete(tts);
 #endif
 
 #ifdef DBUS_ENABLED
-	if (portal_desktop) {
-		memdelete(portal_desktop);
-	}
-	if (screensaver) {
-		memdelete(screensaver);
-	}
-	if (atspi_monitor) {
-		memdelete(atspi_monitor);
-	}
+	memdelete(portal_desktop);
+	memdelete(screensaver);
+	memdelete(atspi_monitor);
 #endif
 }
 
