@@ -40,6 +40,8 @@
 #include "core/templates/rid_owner.h"
 #include "core/templates/tuple.h"
 
+#include <type_traits>
+
 // TextureStreaming singleton.
 // Thread safety notes:
 // - Public API methods are thread-safe and can be called from any thread.
@@ -71,7 +73,7 @@ private:
 		struct Command : public CommandBase {
 			T *instance;
 			M method;
-			Tuple<GetSimpleTypeT<Args>...> args;
+			Tuple<std::decay_t<Args>...> args;
 
 			template <typename... FwdArgs>
 			_FORCE_INLINE_ Command([[maybe_unused]] const char *p_method_name, T *p_instance, M p_method, FwdArgs &&...p_args) :
@@ -302,7 +304,7 @@ private:
 	// mutexes (push → wait_and_flush). The atomics therefore only need atomicity
 	// (tear-free reads/writes), not ordering, so memory_order_relaxed is used.
 	struct StreamingState {
-		// Held by the I/O thread for the duration of one reload
+		// Held by the I/O thread for the duration of one reload (the part that touches the texture)
 		// and taken once by texture_remove() after `removing` is set, so a free only ever waits for
 		// the single reload that may be in flight on this texture, never for the whole I/O queue.
 		BinaryMutex reload_mutex;
@@ -417,7 +419,7 @@ private:
 	uint8_t setting_min_lod = 0; // Best quality mip level - 0 = full resolution
 	uint8_t setting_max_lod = 3; // Worst quality mip level - 3 ≈ 128px for 8K texture
 	uint32_t setting_max_ops_per_second = 500; // 60 fps would be ~8 ops/frame
-	uint32_t setting_max_mb_per_second = 96; // Upload bandwidth cap - 0 = unlimited
+	uint32_t setting_max_mb_per_second = 96; // Upload bandwidth cap, 0 = unlimited
 	uint64_t setting_inactivity_decay_rate_ms = 5000; // Time per mip level of decay (ms)
 	uint32_t setting_budget_mb_override = UINT32_MAX;
 	uint8_t setting_min_lod_override = UINT8_MAX;
@@ -505,7 +507,9 @@ private:
 	// I/O thread for texture reloading - uses its own command queue
 	SimpleCommandQueue io_command_queue;
 
-	// Pending reloads. Every entry has a matching `_do_next_texture_reload` command on the I/O queue
+	// Pending reloads. Every entry has a matching `_do_next_texture_reload` command on the I/O queue,
+	// but which texture a command actually processes is decided when it runs: the one that currently
+	// matters most (closest to the camera / furthest below its target), not the one queued first.
 	BinaryMutex reload_queue_mutex;
 	LocalVector<RID> reload_queue;
 	void _queue_texture_reload(RID p_state_rid);

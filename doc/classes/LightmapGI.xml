@@ -164,6 +164,9 @@
 		<constant name="BAKE_ERROR_ATLAS_TOO_SMALL" value="11" enum="BakeError">
 			Lightmap baking failed as the lightmap was unable to fit into an atlas.
 		</constant>
+		<constant name="BAKE_ERROR_OUT_OF_MEMORY" value="12" enum="BakeError">
+			Lightmap baking failed because the GPU ran out of memory while allocating the bake textures. Lower the texel scale, the supersampling factor or the maximum texture size.
+		</constant>
 		<constant name="ENVIRONMENT_MODE_DISABLED" value="0" enum="EnvironmentMode">
 			Ignore environment lighting when baking lightmaps.
 		</constant>

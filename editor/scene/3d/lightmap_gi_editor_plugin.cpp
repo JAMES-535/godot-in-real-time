@@ -119,13 +119,16 @@ void LightmapGIEditorPlugin::_bake_select_file(const String &p_file) {
 				EditorNode::get_singleton()->show_warning(TTR("Lightmap data is not local to the scene."));
 			} break;
 			case LightmapGI::BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL: {
-				EditorNode::get_singleton()->show_warning(TTR("Maximum texture size is too small for the lightmap images.\nWhile this can be fixed by increasing the maximum texture size, it is recommended you split the scene into more objects instead."));
+				EditorNode::get_singleton()->show_warning(TTR("Maximum texture size is too small for the lightmap images.\nWhile this can be fixed by increasing the maximum texture size, it is recommended you split the scene into more objects instead.\nThe meshes that don't fit are listed in the Output panel."));
 			} break;
 			case LightmapGI::BAKE_ERROR_LIGHTMAP_TOO_SMALL: {
-				EditorNode::get_singleton()->show_warning(TTR("Failed creating lightmap images. Make sure all meshes to bake have the Lightmap Size Hint property set high enough, and the LightmapGI's Texel Scale value is not too low."));
+				EditorNode::get_singleton()->show_warning(TTR("Failed creating lightmap images. Make sure all meshes to bake have the Lightmap Size Hint property set high enough, and the LightmapGI's Texel Scale value is not too low.\nThe offending mesh is named in the Output panel."));
 			} break;
 			case LightmapGI::BAKE_ERROR_ATLAS_TOO_SMALL: {
-				EditorNode::get_singleton()->show_warning(TTR("Failed fitting a lightmap image into an atlas. This should never happen and should be reported."));
+				EditorNode::get_singleton()->show_warning(TTR("Failed fitting a lightmap image into an atlas. This should never happen and should be reported.\nThe offending mesh is named in the Output panel."));
+			} break;
+			case LightmapGI::BAKE_ERROR_OUT_OF_MEMORY: {
+				EditorNode::get_singleton()->show_warning(TTR("The GPU ran out of memory while allocating the lightmap bake textures.\nLower the Texel Scale or Supersampling Factor, reduce the Max Texture Size, or bake fewer meshes at once. The requested size is printed in the Output panel."));
 			} break;
 			default: {
 			} break;

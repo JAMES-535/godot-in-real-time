@@ -1135,7 +1135,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 			}
 			// Double lightmap texel density if downsampling is enabled, as the final texture size will be halved before saving lightmaps.
 			Size2i lightmap_size = Size2i(Size2(mesh_lightmap_size) * mf.lightmap_scale * texel_scale) * (supersampling_enabled ? supersampling_factor : 1.0);
-			ERR_FAIL_COND_V(lightmap_size.x == 0 || lightmap_size.y == 0, BAKE_ERROR_LIGHTMAP_TOO_SMALL);
+			ERR_FAIL_COND_V_MSG(lightmap_size.x == 0 || lightmap_size.y == 0, BAKE_ERROR_LIGHTMAP_TOO_SMALL, vformat("Lightmap bake: \"%s\" ends up with a %dx%d lightmap (size hint %dx%d * lightmap scale %.2f * texel scale %.3f). Increase its Lightmap Size Hint / lightmap scale, or the LightmapGI texel scale.", String(mf.node_path), lightmap_size.x, lightmap_size.y, mesh_lightmap_size.x, mesh_lightmap_size.y, mf.lightmap_scale, texel_scale));
 
 			TypedArray<RID> overrides;
 			overrides.resize(mf.overrides.size());
@@ -1513,6 +1513,8 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 		return BAKE_ERROR_ATLAS_TOO_SMALL;
 	} else if (bake_err == Lightmapper::BAKE_ERROR_USER_ABORTED) {
 		return BAKE_ERROR_USER_ABORTED;
+	} else if (bake_err == Lightmapper::BAKE_ERROR_OUT_OF_MEMORY) {
+		return BAKE_ERROR_OUT_OF_MEMORY;
 	}
 
 	// POSTBAKE: Save Textures.
@@ -2227,6 +2229,7 @@ void LightmapGI::_bind_methods() {
 	BIND_ENUM_CONSTANT(BAKE_ERROR_TEXTURE_SIZE_TOO_SMALL);
 	BIND_ENUM_CONSTANT(BAKE_ERROR_LIGHTMAP_TOO_SMALL);
 	BIND_ENUM_CONSTANT(BAKE_ERROR_ATLAS_TOO_SMALL);
+	BIND_ENUM_CONSTANT(BAKE_ERROR_OUT_OF_MEMORY);
 
 	BIND_ENUM_CONSTANT(ENVIRONMENT_MODE_DISABLED);
 	BIND_ENUM_CONSTANT(ENVIRONMENT_MODE_SCENE);

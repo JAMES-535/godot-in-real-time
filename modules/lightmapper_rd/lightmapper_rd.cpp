@@ -303,6 +303,24 @@ void LightmapperRD::_sort_triangle_clusters(uint32_t p_cluster_size, uint32_t p_
 	}
 }
 
+String LightmapperRD::_mesh_instance_name(int p_index) const {
+	if (p_index < 0 || p_index >= mesh_instances.size()) {
+		return "<unknown mesh>";
+	}
+	const Variant &ud = mesh_instances[p_index].data.userdata;
+	if (ud.get_type() == Variant::DICTIONARY) {
+		Dictionary d = ud;
+		if (d.has("path")) {
+			String name = String(d["path"]);
+			if (d.has("subindex")) {
+				name += vformat(" (surface %d)", int(d["subindex"]));
+			}
+			return name;
+		}
+	}
+	return vformat("mesh #%d", p_index);
+}
+
 Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_size, int p_denoiser_range, Vector<Ref<Image>> &albedo_images, Vector<Ref<Image>> &emission_images, AABB &bounds, Size2i &atlas_size, int &atlas_slices, float p_supersampling_factor, BakeStepFunc p_step_function, void *p_bake_userdata) {
 	Vector<Size2i> sizes;
 
@@ -317,6 +335,21 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 	max = MAX(max, Math::nearest_power_of_2_templated(atlas_size.height));
 
 	if (max > p_max_texture_size) {
+		String offenders;
+		int listed = 0;
+		for (int m_i = 0; m_i < mesh_instances.size(); m_i++) {
+			Size2i padded = sizes[m_i] + Size2i(2, 2).maxi(p_denoiser_range) * p_supersampling_factor;
+			if (Math::nearest_power_of_2_templated(padded.width) > p_max_texture_size || Math::nearest_power_of_2_templated(padded.height) > p_max_texture_size) {
+				if (listed < 16) {
+					offenders += vformat("\n  - %s (lightmap %dx%d, padded %dx%d)", _mesh_instance_name(m_i), sizes[m_i].width, sizes[m_i].height, padded.width, padded.height);
+				}
+				listed++;
+			}
+		}
+		if (listed > 16) {
+			offenders += vformat("\n  ... and %d more", listed - 16);
+		}
+		ERR_PRINT(vformat("Lightmap bake: %d mesh(es) need a lightmap larger than the maximum texture size (%d), with supersampling x%d applied:%s", listed, p_max_texture_size, int(p_supersampling_factor), offenders));
 		return BAKE_ERROR_TEXTURE_EXCEEDS_MAX_SIZE;
 	}
 
@@ -353,6 +386,7 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 		// This should always happen, and this check is only in place to prevent an infinite loop.
 		for (int i = 0; i < source_sizes.size(); i++) {
 			if (source_sizes[i] > atlas_size) {
+				ERR_PRINT(vformat("Lightmap bake: %s needs %dx%d but the atlas is only %dx%d.", _mesh_instance_name(i), source_sizes[i].width, source_sizes[i].height, atlas_size.width, atlas_size.height));
 				return BAKE_ERROR_ATLAS_TOO_SMALL;
 			}
 		}
@@ -1337,6 +1371,31 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			Vector<Vector<uint8_t>> tdata;
 			tdata.push_back(area_light_atlas.atlas_data);
 			area_light_atlas_tex = rd->texture_create(tformat, RD::TextureView(), tdata);
+		}
+
+		bool textures_ok = albedo_array_tex.is_valid() && emission_array_tex.is_valid() && normal_tex.is_valid() && position_tex.is_valid() && unocclude_tex.is_valid() && light_source_tex.is_valid() && light_accum_tex.is_valid() && light_dest_tex.is_valid() && light_environment_tex.is_valid() && area_light_atlas_tex.is_valid();
+		if (p_bake_shadowmask) {
+			textures_ok = textures_ok && shadowmask_tex.is_valid() && shadowmask_tex2.is_valid();
+		}
+		if (!textures_ok) {
+			// Rough size of what was requested, to make the message actionable.
+			const uint64_t texels = uint64_t(atlas_size.width) * uint64_t(atlas_size.height) * uint64_t(atlas_slices);
+			uint64_t bytes = texels * (4 + 8 + 8 + 16 + 16 + 8); // albedo, emission, normal, position, unocclude, light_source.
+			bytes += texels * 8 * 2 * (p_bake_sh ? 4 : 1); // light_accum + light_dest.
+			if (p_bake_shadowmask) {
+				bytes += texels * 4 * 2;
+			}
+			RID *all[] = { &albedo_array_tex, &emission_array_tex, &normal_tex, &position_tex, &unocclude_tex, &light_source_tex, &light_accum_tex, &light_dest_tex, &light_environment_tex, &area_light_atlas_tex, &shadowmask_tex, &shadowmask_tex2 };
+			for (RID *r : all) {
+				if (r->is_valid()) {
+					rd->free_rid(*r);
+					*r = RID();
+				}
+			}
+			memdelete(rd);
+			memdelete(rcd);
+			ERR_PRINT(vformat("Lightmap bake: failed to allocate the bake textures (%dx%d, %d slice(s), about %d MB of VRAM%s). Lower the texel scale or supersampling factor, reduce the maximum texture size, or close other GPU-heavy applications.", atlas_size.width, atlas_size.height, atlas_slices, int(bytes / (1024 * 1024)), p_supersampling_factor > 1.0 ? vformat(", supersampling x%d", int(p_supersampling_factor)) : String()));
+			return BAKE_ERROR_OUT_OF_MEMORY;
 		}
 	}
 

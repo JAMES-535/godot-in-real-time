@@ -2020,6 +2020,13 @@ VmaPool RenderingDeviceDriverVulkan::_find_or_create_block_pool(HashMap<uint32_t
 		return p_pools[p_mem_type_index];
 	}
 
+	// Local devices (lightmapper, compute scripts) have no swapchain and get frame_count == 1. They share the GPU
+	// with the main device, so reserving the configured blocks for them too would take away a second copy of the
+	// reserve (easily 1-2 GB) right when the lightmapper is about to allocate its atlases.
+	if (frame_count <= 1) {
+		p_reserved_blocks = 0;
+	}
+
 	print_line(vformat("Creating VMA %s pool for memory type index %d (%d blocks of %d MB reserved).", p_name, p_mem_type_index, p_reserved_blocks, p_block_size / (1024 * 1024)));
 
 	VmaPoolCreateInfo pci = {};
