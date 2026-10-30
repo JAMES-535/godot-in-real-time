@@ -1795,6 +1795,10 @@ void fragment_shader(in SceneData scene_data) {
 	indirect_specular_light = mix(indirect_specular_light, custom_radiance.rgb, custom_radiance.a);
 #endif
 
+#if defined(USE_LIGHTMAP) && !defined(SHADOWS_DISABLED) && !defined(USE_VERTEX_LIGHTING) && !defined(MODE_UNSHADED)
+#define SUBTRACTIVE_SHADOWS
+#endif
+
 #ifndef USE_LIGHTMAP
 	//lightmap overrides everything
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
@@ -2316,6 +2320,11 @@ void fragment_shader(in SceneData scene_data) {
 #endif // SPECULAR_OCCLUSION_DISABLED
 		ambient_light *= albedo.rgb;
 
+#if defined(SUBTRACTIVE_SHADOWS)
+		// What the lightmap delivers here (after albedo), used to tell baked shadow from lit surface per light.
+		subtractive_lightmap_luma = dot(ambient_light, vec3(0.2126, 0.7152, 0.0722));
+#endif
+
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL)) {
 #ifdef USE_MULTIVIEW
 			vec4 ssil = textureLod(sampler2DArray(ssil_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0);
@@ -2468,7 +2477,14 @@ void fragment_shader(in SceneData scene_data) {
 				}
 
 				if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+#if defined(SUBTRACTIVE_SHADOWS)
+					if (directional_lights.data[i].shadow_opacity <= 0.001) {
+						continue;
+					}
+					// Baked sun with a (dynamic-casters-only) shadow map: its shadow is still needed below.
+#else
 					continue; // Statically baked light and object uses lightmap, skip
+#endif
 				}
 
 				float shadow = 1.0;
@@ -2709,8 +2725,16 @@ void fragment_shader(in SceneData scene_data) {
 				continue; //not masked
 			}
 
+			bool directional_subtractive = false;
 			if (directional_lights.data[i].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+#if defined(SUBTRACTIVE_SHADOWS)
+				if (directional_lights.data[i].shadow_opacity <= 0.001) {
+					continue;
+				}
+				directional_subtractive = true;
+#else
 				continue; // Statically baked light and object uses lightmap, skip
+#endif
 			}
 
 #ifdef LIGHT_TRANSMITTANCE_USED
@@ -2776,6 +2800,13 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 
 			blur_shadow(shadow);
+
+#if defined(SUBTRACTIVE_SHADOWS)
+			if (directional_subtractive) {
+				subtractive_accumulate(hvec3(directional_lights.data[i].color * directional_lights.data[i].energy), half(1.0), half(shadow), normal, hvec3(directional_lights.data[i].direction), albedo);
+				continue;
+			}
+#endif
 
 #ifdef DEBUG_DRAW_PSSM_SPLITS
 			vec3 tint = vec3(1.0);
@@ -2860,8 +2891,16 @@ void fragment_shader(in SceneData scene_data) {
 					continue; //not masked
 				}
 
+				subtractive_light_mode = false;
 				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+#if defined(SUBTRACTIVE_SHADOWS)
+					if (omni_lights.data[light_index].shadow_opacity <= 0.001) {
+						continue; // Baked, no shadow map: nothing a dynamic object could change.
+					}
+					subtractive_light_mode = true; // Baked light: only subtract what dynamic casters block.
+#else
 					continue; // Statically baked light and object uses lightmap, skip
+#endif
 				}
 
 				light_process_omni(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
@@ -2921,8 +2960,16 @@ void fragment_shader(in SceneData scene_data) {
 					continue; //not masked
 				}
 
+				subtractive_light_mode = false;
 				if (spot_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+#if defined(SUBTRACTIVE_SHADOWS)
+					if (spot_lights.data[light_index].shadow_opacity <= 0.001) {
+						continue;
+					}
+					subtractive_light_mode = true;
+#else
 					continue; // Statically baked light and object uses lightmap, skip
+#endif
 				}
 
 				light_process_spot(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
@@ -3145,7 +3192,9 @@ void fragment_shader(in SceneData scene_data) {
 	orm_output_buffer.a = sss_strength;
 
 	emission_output_buffer.rgb = emission;
-	emission_output_buffer.a = 0.0;
+	// Backlight strength for the lightmapper: light that hits the back of a thin surface (leaves, cloth, paper)
+	// and comes through. Stored in the otherwise unused emission alpha so no extra bake channel is needed.
+	emission_output_buffer.a = dot(backlight, vec3(0.2126, 0.7152, 0.0722));
 #endif
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
@@ -3177,6 +3226,11 @@ void fragment_shader(in SceneData scene_data) {
 #else
 
 	// multiply by albedo
+#if defined(SUBTRACTIVE_SHADOWS)
+	// Dynamic objects' shadows under baked lights: take the blocked direct light out of the lightmap term.
+	ambient_light = max(ambient_light - vec3(subtractive_light) * albedo, vec3(0.0));
+#endif
+
 	diffuse_light *= albedo; // ambient must be multiplied by albedo at the end
 
 	// apply direct light AO

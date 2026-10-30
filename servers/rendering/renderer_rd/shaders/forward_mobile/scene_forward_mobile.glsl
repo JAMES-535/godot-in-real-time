@@ -2418,7 +2418,7 @@ void main() {
 	orm_output_buffer.a = sss_strength;
 
 	emission_output_buffer.rgb = emission;
-	emission_output_buffer.a = 0.0;
+	emission_output_buffer.a = dot(backlight_highp, vec3(0.2126, 0.7152, 0.0722));
 #endif // MODE_RENDER_MATERIAL
 
 #else // MODE_RENDER_DEPTH

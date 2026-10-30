@@ -454,6 +454,21 @@ half sample_directional_soft_shadow(texture2D shadow, vec3 pssm_coord, vec2 tex_
 
 #endif // SHADOWS_DISABLED
 
+bool subtractive_light_mode = false;
+float subtractive_lightmap_luma = 0.0;
+hvec3 subtractive_light = hvec3(0.0);
+
+void subtractive_accumulate(hvec3 color, half attenuation, half shadow, hvec3 normal, hvec3 light_dir, hvec3 albedo) {
+	half ndotl = max(dot(normal, light_dir), half(0.0));
+	hvec3 direct = color * attenuation * ndotl * half(1.0 / M_PI); // Lambert irradiance, what the bake stored.
+	float direct_luma = dot(vec3(direct * albedo), vec3(0.2126, 0.7152, 0.0722));
+	if (direct_luma <= 1e-5) {
+		return;
+	}
+	float visible = clamp(subtractive_lightmap_luma / direct_luma, 0.0, 1.0);
+	subtractive_light += direct * (half(1.0) - shadow) * half(visible);
+}
+
 half get_omni_attenuation(float distance, float inv_range, float decay) {
 	float nd = distance * inv_range;
 	nd *= nd;
@@ -729,6 +744,10 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	}
 
 	vec3 light_rel_vec_norm = light_rel_vec / light_length;
+	if (subtractive_light_mode) {
+		subtractive_accumulate(hvec3(color), omni_attenuation, shadow, normal, hvec3(light_rel_vec_norm), albedo);
+		return;
+	}
 	light_compute(normal, hvec3(light_rel_vec_norm), eye_vec, size, hvec3(color), false, omni_attenuation * shadow, f0, roughness, metallic, half(omni_lights.data[idx].specular_amount), albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 			backlight,
@@ -931,6 +950,10 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		}
 	}
 
+	if (subtractive_light_mode) {
+		subtractive_accumulate(hvec3(color), spot_attenuation, shadow, normal, hvec3(light_rel_vec_norm), albedo);
+		return;
+	}
 	light_compute(normal, hvec3(light_rel_vec_norm), eye_vec, size, hvec3(color), false, spot_attenuation * shadow, f0, roughness, metallic, half(spot_lights.data[idx].specular_amount), albedo, alpha, screen_uv, energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 			backlight,

@@ -202,6 +202,11 @@ private:
 	bool supersampling_enabled = false;
 	float supersampling_factor = 2.0;
 	bool interior = false;
+	bool cross_zone_bake = false;
+	Node *bake_scope = nullptr;
+	LocalVector<Node *> foreign_zone_roots;
+	void _collect_foreign_zone_roots(Node *p_node);
+	bool _is_foreign_zone(Node *p_node) const;
 	EnvironmentMode environment_mode = ENVIRONMENT_MODE_SCENE;
 	Ref<Sky> environment_custom_sky;
 	Color environment_custom_color = Color(1, 1, 1);
@@ -240,6 +245,10 @@ private:
 
 	void _assign_lightmaps();
 	void _clear_lightmaps();
+	LocalVector<int> pending_lightmap_users;
+	int pending_lightmap_frames = 0;
+	bool _assign_lightmap_user(int p_index);
+	void _retry_pending_lightmap_users();
 
 	struct BSPSimplex {
 		int vertices[4] = {};
@@ -305,6 +314,9 @@ public:
 
 	void set_directional(bool p_enable);
 	bool is_directional() const;
+
+	void set_cross_zone_bake(bool p_enable);
+	bool is_cross_zone_bake() const;
 
 	void set_shadowmask_mode(LightmapGIData::ShadowmaskMode p_mode);
 	LightmapGIData::ShadowmaskMode get_shadowmask_mode() const;

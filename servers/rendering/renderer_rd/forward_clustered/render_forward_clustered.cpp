@@ -4352,7 +4352,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(
 	while (material->next_pass.is_valid()) {
 		RID next_pass = material->next_pass;
 		material = static_cast<SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(next_pass, RendererRD::MaterialStorage::SHADER_TYPE_3D));
-		if (material && !material->shader_data->is_ready()) {
+		if (material && (!material->shader_data->is_ready() || material_storage->material_is_waiting_for_shader(next_pass))) {
 			ginstance->waiting_for_shader = true;
 			break;
 		}
@@ -4376,7 +4376,7 @@ void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForw
 
 	if (m_src.is_valid()) {
 		material = static_cast<SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(m_src, RendererRD::MaterialStorage::SHADER_TYPE_3D));
-		if (material && !material->shader_data->is_ready()) {
+		if (material && (!material->shader_data->is_ready() || material_storage->material_is_waiting_for_shader(m_src))) {
 			// Still compiling (is_valid() would block the render thread until it finished). Don't add the surface
 			// at all for now (adding it with the default material flashes white); the instance is re-evaluated on
 			// the next update and picks the real material up once the shader is ready.

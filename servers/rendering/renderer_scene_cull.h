@@ -276,6 +276,7 @@ public:
 			FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN = (1 << 22),
 			FLAG_GEOM_PROJECTOR_SOFTSHADOW_DIRTY = (1 << 23),
 			FLAG_IGNORE_ALL_CULLING = (1 << 24),
+			FLAG_HAS_LIGHTMAP = (1 << 25),
 		};
 
 		uint32_t flags = 0;
@@ -1086,6 +1087,7 @@ public:
 		struct Shadow {
 			RID light_instance;
 			uint32_t caster_mask;
+			bool dynamic_casters_only = false;
 			struct Cascade {
 				Frustum frustum;
 

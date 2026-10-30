@@ -2474,16 +2474,21 @@ void MaterialStorage::_update_queued_materials() {
 			if (!E->in_list()) {
 				material_update_list.add(E);
 			}
+			if (!material->waiting_for_shader.exchange(true)) {
+				material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+			}
 			continue;
 		}
 
+		const bool was_waiting = material->waiting_for_shader.exchange(false);
 		if (material->data) {
 			uniforms_changed = material->data->update_parameters(material->params, material->uniform_dirty, material->texture_dirty);
 		}
 		material->texture_dirty = false;
 		material->uniform_dirty = false;
 
-		if (uniforms_changed) {
+		if (uniforms_changed || was_waiting) {
+			//some implementations such as 3D renderer cache the material uniform set, so update is required
 			material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 		}
 	}

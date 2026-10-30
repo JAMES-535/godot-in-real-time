@@ -87,8 +87,17 @@ void LightmapGIEditorPlugin::_bake_select_file(const String &p_file) {
 
 		bake_func_end(time_started);
 
+		_show_bake_error(err);
+	}
+}
+
+void LightmapGIEditorPlugin::_show_bake_error(LightmapGI::BakeError err) {
+	{
 		switch (err) {
 			case LightmapGI::BAKE_ERROR_NO_SAVE_PATH: {
+				if (!lightmap) {
+					break;
+				}
 				String scene_path = lightmap->get_scene_file_path();
 				if (scene_path.is_empty() && lightmap->get_owner()) {
 					scene_path = lightmap->get_owner()->get_scene_file_path();
@@ -140,6 +149,80 @@ void LightmapGIEditorPlugin::_bake() {
 	_bake_select_file("");
 }
 
+void LightmapGIEditorPlugin::_collect_lightmaps(Node *p_node, Vector<LightmapGI *> &r_out) const {
+	LightmapGI *lm = Object::cast_to<LightmapGI>(p_node);
+	if (lm && lm->is_visible_in_tree()) {
+		r_out.push_back(lm);
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		_collect_lightmaps(p_node->get_child(i), r_out);
+	}
+}
+
+// Bakes every visible LightmapGI in the edited scene
+void LightmapGIEditorPlugin::_bake_all() {
+	Node *root = get_tree()->get_edited_scene_root();
+	if (!root) {
+		EditorNode::get_singleton()->show_warning(TTR("No editor scene root found."));
+		return;
+	}
+
+	Vector<LightmapGI *> lightmaps;
+	_collect_lightmaps(root, lightmaps);
+	if (lightmaps.is_empty()) {
+		EditorNode::get_singleton()->show_warning(TTR("No visible LightmapGI nodes in the scene."));
+		return;
+	}
+
+	const uint64_t time_started = OS::get_singleton()->get_ticks_msec();
+	int baked = 0;
+	String failures;
+	for (LightmapGI *lm : lightmaps) {
+		String path;
+		Ref<LightmapGIData> data = lm->get_light_data();
+		if (data.is_valid() && data->get_path().is_resource_file()) {
+			path = data->get_path();
+		} else {
+			// Default
+			Node *owner = lm->get_owner() ? lm->get_owner() : root;
+			String scene_path = owner->get_scene_file_path();
+			if (scene_path.is_empty()) {
+				scene_path = root->get_scene_file_path();
+			}
+			if (scene_path.is_empty()) {
+				failures += vformat("\n  - %s: no light data and the scene is not saved", root->get_path_to(lm));
+				continue;
+			}
+			path = scene_path.get_basename() + ".lmbake";
+			if (lightmaps.size() > 1 && owner == root) {
+				path = scene_path.get_basename() + "_" + String(lm->get_name()).validate_filename() + ".lmbake";
+			}
+		}
+
+		print_line(vformat("Baking %s -> %s", root->get_path_to(lm), path));
+		LightmapGI::BakeError err = lm->bake(lm == root ? lm : lm->get_parent(), path, bake_func_step);
+		if (tmp_progress != nullptr) {
+			memdelete(tmp_progress);
+			tmp_progress = nullptr;
+		}
+		if (err == LightmapGI::BAKE_ERROR_OK) {
+			baked++;
+		} else if (err == LightmapGI::BAKE_ERROR_USER_ABORTED) {
+			failures += vformat("\n  - %s: aborted", root->get_path_to(lm));
+			break;
+		} else {
+			failures += vformat("\n  - %s: error %d", root->get_path_to(lm), int(err));
+			_show_bake_error(err);
+		}
+	}
+
+	bake_func_end(time_started);
+	print_line(vformat("Bake All: %d of %d LightmapGI nodes baked.%s", baked, lightmaps.size(), failures));
+	if (!failures.is_empty()) {
+		EditorNode::get_singleton()->show_warning(vformat(TTR("Bake All finished with problems:%s"), failures));
+	}
+}
+
 void LightmapGIEditorPlugin::edit(Object *p_object) {
 	LightmapGI *s = Object::cast_to<LightmapGI>(p_object);
 	if (!s) {
@@ -156,8 +239,10 @@ bool LightmapGIEditorPlugin::handles(Object *p_object) const {
 void LightmapGIEditorPlugin::make_visible(bool p_visible) {
 	if (p_visible) {
 		bake->show();
+		bake_all->show();
 	} else {
 		bake->hide();
+		bake_all->hide();
 	}
 }
 
@@ -187,6 +272,7 @@ void LightmapGIEditorPlugin::bake_func_end(uint64_t p_time_started) {
 
 void LightmapGIEditorPlugin::_bind_methods() {
 	ClassDB::bind_method("_bake", &LightmapGIEditorPlugin::_bake);
+	ClassDB::bind_method("_bake_all", &LightmapGIEditorPlugin::_bake_all);
 }
 
 LightmapGIEditorPlugin::LightmapGIEditorPlugin() {
@@ -216,6 +302,16 @@ LightmapGIEditorPlugin::LightmapGIEditorPlugin() {
 	bake->hide();
 	bake->connect(SceneStringName(pressed), Callable(this, "_bake"));
 	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, bake);
+
+	bake_all = memnew(Button);
+	bake_all->set_theme_type_variation(SceneStringName(FlatButton));
+	bake_all->set_button_icon(EditorNode::get_singleton()->get_editor_theme()->get_icon(SNAME("Bake"), EditorStringName(EditorIcons)));
+	bake_all->set_text(TTR("Bake All Lightmaps"));
+	bake_all->set_tooltip_text(TTR("Bake every visible LightmapGI in the scene, one after the other, each into its own light data.\nEnable Cross Zone Bake on them so neighbouring zones light each other."));
+	bake_all->set_disabled(bake->is_disabled());
+	bake_all->hide();
+	bake_all->connect(SceneStringName(pressed), Callable(this, "_bake_all"));
+	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, bake_all);
 	lightmap = nullptr;
 
 	file_dialog = memnew(EditorFileDialog);

@@ -1647,13 +1647,18 @@ void LightStorage::reflection_probe_release_atlas_index(RID p_instance) {
 	ReflectionProbeInstance *rpi = reflection_probe_instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(rpi);
 
-	if (rpi->atlas.is_null()) {
-		return; //nothing to release
+	if (rpi->atlas.is_null() || rpi->atlas_index < 0) {
+		// Nothing to release: never rendered, or evicted from the atlas by a busier probe.
+		rpi->atlas_index = -1;
+		rpi->atlas = RID();
+		return;
 	}
 	ReflectionAtlas *atlas = reflection_atlas_owner.get_or_null(rpi->atlas);
 	ERR_FAIL_NULL(atlas);
 	ERR_FAIL_INDEX(rpi->atlas_index, atlas->reflections.size());
-	atlas->reflections.write[rpi->atlas_index].owner = RID();
+	if (atlas->reflections[rpi->atlas_index].owner == p_instance) {
+		atlas->reflections.write[rpi->atlas_index].owner = RID();
+	}
 
 	// TODO investigate if this is enough? shouldn't we be freeing our textures and framebuffers?
 
@@ -1818,6 +1823,7 @@ bool LightStorage::reflection_probe_instance_begin_render(RID p_instance, RID p_
 				ReflectionProbeInstance *evicted = reflection_probe_instance_owner.get_or_null(atlas->reflections[rpi->atlas_index].owner);
 				if (evicted != nullptr && evicted != rpi) {
 					evicted->atlas_index = -1;
+					evicted->atlas = RID(); // No slot in any atlas now; it re-acquires one when next rendered.
 					evicted->dirty = true; // Re-render when it is next needed.
 					evicted->rendering = false;
 				}

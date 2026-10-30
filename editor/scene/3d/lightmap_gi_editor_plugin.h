@@ -31,6 +31,7 @@
 #pragma once
 
 #include "editor/plugins/editor_plugin.h"
+#include "scene/3d/lightmap_gi.h"
 
 struct EditorProgress;
 class EditorFileDialog;
@@ -42,6 +43,7 @@ class LightmapGIEditorPlugin : public EditorPlugin {
 	LightmapGI *lightmap = nullptr;
 
 	Button *bake = nullptr;
+	Button *bake_all = nullptr;
 
 	EditorFileDialog *file_dialog = nullptr;
 	static EditorProgress *tmp_progress;
@@ -50,6 +52,9 @@ class LightmapGIEditorPlugin : public EditorPlugin {
 
 	void _bake_select_file(const String &p_file);
 	void _bake();
+	void _bake_all();
+	void _collect_lightmaps(Node *p_node, Vector<LightmapGI *> &r_out) const;
+	void _show_bake_error(LightmapGI::BakeError p_err);
 
 protected:
 	static void _bind_methods();

@@ -31,6 +31,7 @@
 #include "lightmap_gi.h"
 
 #include "core/config/engine.h"
+#include "scene/main/scene_tree.h"
 #include "core/config/project_settings.h"
 #include "core/io/config_file.h"
 #include "core/io/resource_loader.h"
@@ -400,9 +401,33 @@ LightmapGIData::~LightmapGIData() {
 
 ///////////////////////////
 
+void LightmapGI::_collect_foreign_zone_roots(Node *p_node) {
+	LightmapGI *other = Object::cast_to<LightmapGI>(p_node);
+	if (other && other != this && other->get_parent()) {
+		Node *root = other->get_parent();
+		if (root != get_parent() && !root->is_ancestor_of(this)) {
+			foreign_zone_roots.push_back(root);
+		}
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		_collect_foreign_zone_roots(p_node->get_child(i));
+	}
+}
+
+bool LightmapGI::_is_foreign_zone(Node *p_node) const {
+	for (Node *root : foreign_zone_roots) {
+		if (root == p_node || root->is_ancestor_of(p_node)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &meshes, Vector<LightsFound> &lights, Vector<Vector3> &probes, bool p_occluder_only) {
 	Node3D *n3d = Object::cast_to<Node3D>(p_at_node);
-    const bool occluder_only = p_occluder_only || (n3d && n3d->is_lightmap_occluder_only());
+	// Cross zone bake
+	const bool outside_scope = (bake_scope != nullptr && p_at_node != bake_scope && !bake_scope->is_ancestor_of(p_at_node) && !p_at_node->is_ancestor_of(bake_scope)) || _is_foreign_zone(p_at_node);
+	const bool occluder_only = p_occluder_only || outside_scope || (n3d && n3d->is_lightmap_occluder_only());
 
     MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(p_at_node);
 	if (mi && mi->get_gi_mode() == GeometryInstance3D::GI_MODE_STATIC && mi->is_visible_in_tree()) {
@@ -495,7 +520,7 @@ void LightmapGI::_find_meshes_and_lights(Node *p_at_node, Vector<MeshesFound> &m
 
 	LightmapProbe *probe = Object::cast_to<LightmapProbe>(p_at_node);
 
-	if (probe) {
+	if (probe && !outside_scope) {
 		Transform3D xf = get_global_transform().affine_inverse() * probe->get_global_transform();
 		probes.push_back(xf.origin);
 	}
@@ -1111,7 +1136,31 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 	AABB bounds;
 	{
 		Vector<MeshesFound> meshes_found;
-		_find_meshes_and_lights(p_from_node ? p_from_node : get_parent(), meshes_found, lights_found, probes_found);
+		Node *from_node = p_from_node ? p_from_node : get_parent();
+		bake_scope = nullptr;
+		foreign_zone_roots.clear();
+		if (cross_zone_bake && is_inside_tree()) {
+			Node *scene_root = nullptr;
+#ifdef TOOLS_ENABLED
+			if (Engine::get_singleton()->is_editor_hint()) {
+				scene_root = get_tree()->get_edited_scene_root();
+			}
+#endif
+			if (!scene_root) {
+				scene_root = get_tree()->get_current_scene();
+			}
+			Node *scope = (p_from_node && p_from_node != this) ? p_from_node : get_parent();
+			if (scene_root && scope && scene_root != scope && scene_root->is_ancestor_of(scope)) {
+				bake_scope = scope;
+				from_node = scene_root;
+			}
+			if (scene_root) {
+				_collect_foreign_zone_roots(scene_root);
+			}
+		}
+		_find_meshes_and_lights(from_node, meshes_found, lights_found, probes_found);
+		bake_scope = nullptr;
+		foreign_zone_roots.clear();
 
 		if (meshes_found.is_empty()) {
 			return BAKE_ERROR_NO_MESHES;
@@ -1135,7 +1184,7 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 			}
 			// Double lightmap texel density if downsampling is enabled, as the final texture size will be halved before saving lightmaps.
 			Size2i lightmap_size = Size2i(Size2(mesh_lightmap_size) * mf.lightmap_scale * texel_scale) * (supersampling_enabled ? supersampling_factor : 1.0);
-			ERR_FAIL_COND_V_MSG(lightmap_size.x == 0 || lightmap_size.y == 0, BAKE_ERROR_LIGHTMAP_TOO_SMALL, vformat("Lightmap bake: \"%s\" ends up with a %dx%d lightmap (size hint %dx%d * lightmap scale %.2f * texel scale %.3f). Increase its Lightmap Size Hint / lightmap scale, or the LightmapGI texel scale.", String(mf.node_path), lightmap_size.x, lightmap_size.y, mesh_lightmap_size.x, mesh_lightmap_size.y, mf.lightmap_scale, texel_scale));
+			lightmap_size = lightmap_size.maxi(1);
 
 			TypedArray<RID> overrides;
 			overrides.resize(mf.overrides.size());
@@ -1254,10 +1303,13 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 
 					for (int k = 0; k < 3; k++) {
 						Vector3 v = mf.xform.xform(vr[vidx[k]]);
-						if (bounds == AABB()) {
-							bounds.position = v;
-						} else {
-							bounds.expand_to(v);
+						// Occluder only meshes
+						if (!mf.occluder_only) {
+							if (bounds == AABB()) {
+								bounds.position = v;
+							} else {
+								bounds.expand_to(v);
+							}
 						}
 						md.points.push_back(v);
 
@@ -1319,6 +1371,10 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 			if (p_bake_step) {
 				float p = (float)(i) / mesh_data_size;
 				p_bake_step(0.3 + p * 0.1, vformat(RTR("Creating probes from mesh %d/%d"), i, mesh_data_size), p_bake_userdata, false);
+			}
+
+			if (mesh_data[i].userdata.get_type() == Variant::DICTIONARY && Dictionary(mesh_data[i].userdata).get("occluder_only", false)) {
+				continue;
 			}
 
 			for (int j = 0; j < mesh_data[i].points.size(); j += 3) {
@@ -1755,47 +1811,99 @@ void LightmapGI::_notification(int p_what) {
 		case NOTIFICATION_EXIT_TREE: {
 			last_owner = get_owner();
 
+			pending_lightmap_users.clear();
+			set_process_internal(false);
 			if (light_data.is_valid()) {
 				_clear_lightmaps();
 			}
 		} break;
+
+		case NOTIFICATION_INTERNAL_PROCESS: {
+			_retry_pending_lightmap_users();
+		} break;
 	}
+}
+
+// How long to keep looking for baked nodes that arent in the tree yet
+static const int LIGHTMAP_USER_RETRY_FRAMES = 600;
+
+bool LightmapGI::_assign_lightmap_user(int p_index) {
+	NodePath user_path = light_data->get_user_path(p_index);
+	Node *node = get_node_or_null(user_path);
+	if (!node) {
+		return false;
+	}
+	int instance_idx = light_data->get_user_sub_instance(p_index);
+	if (instance_idx >= 0) {
+		RID instance_id = node->call("get_bake_mesh_instance", instance_idx);
+		if (instance_id.is_valid()) {
+			RS::get_singleton()->instance_geometry_set_lightmap(instance_id, get_instance(), light_data->get_user_lightmap_uv_scale(p_index), light_data->get_user_lightmap_slice_index(p_index));
+		}
+	} else {
+		VisualInstance3D *vi = Object::cast_to<VisualInstance3D>(node);
+		if (vi) {
+			RS::get_singleton()->instance_geometry_set_lightmap(vi->get_instance(), get_instance(), light_data->get_user_lightmap_uv_scale(p_index), light_data->get_user_lightmap_slice_index(p_index));
+		}
+	}
+	return true;
 }
 
 void LightmapGI::_assign_lightmaps() {
 	ERR_FAIL_COND(light_data.is_null());
 
-	Vector<String> missing_node_paths;
-
+	pending_lightmap_users.clear();
 	for (int i = 0; i < light_data->get_user_count(); i++) {
-		NodePath user_path = light_data->get_user_path(i);
-		Node *node = get_node_or_null(user_path);
-		if (!node) {
-			missing_node_paths.push_back(String(user_path));
-			continue;
-		}
-		int instance_idx = light_data->get_user_sub_instance(i);
-		if (instance_idx >= 0) {
-			RID instance_id = node->call("get_bake_mesh_instance", instance_idx);
-			if (instance_id.is_valid()) {
-				RS::get_singleton()->instance_geometry_set_lightmap(instance_id, get_instance(), light_data->get_user_lightmap_uv_scale(i), light_data->get_user_lightmap_slice_index(i));
-			}
-		} else {
-			VisualInstance3D *vi = Object::cast_to<VisualInstance3D>(node);
-			ERR_CONTINUE(!vi);
-			RS::get_singleton()->instance_geometry_set_lightmap(vi->get_instance(), get_instance(), light_data->get_user_lightmap_uv_scale(i), light_data->get_user_lightmap_slice_index(i));
+		if (!_assign_lightmap_user(i)) {
+			pending_lightmap_users.push_back(i);
 		}
 	}
 
-	if (!missing_node_paths.is_empty()) {
-		String missing_paths_text;
-		if (missing_node_paths.size() <= 3) {
-			missing_paths_text = String(", ").join(missing_node_paths);
-		} else {
-			missing_paths_text = vformat("%s and %d more", String(", ").join(missing_node_paths.slice(0, 3)), missing_node_paths.size() - 3);
-		}
-		WARN_PRINT(vformat("%s couldn't find previously baked nodes and needs a rebake (missing nodes: %s).", get_name(), missing_paths_text));
+	if (!pending_lightmap_users.is_empty()) {
+		pending_lightmap_frames = LIGHTMAP_USER_RETRY_FRAMES;
+		set_process_internal(true);
+	} else {
+		set_process_internal(false);
 	}
+}
+
+void LightmapGI::_retry_pending_lightmap_users() {
+	if (light_data.is_null() || !is_inside_tree()) {
+		pending_lightmap_users.clear();
+		set_process_internal(false);
+		return;
+	}
+
+	LocalVector<int> still_missing;
+	for (int idx : pending_lightmap_users) {
+		if (idx >= light_data->get_user_count() || !_assign_lightmap_user(idx)) {
+			still_missing.push_back(idx);
+		}
+	}
+	pending_lightmap_users = still_missing;
+
+	if (pending_lightmap_users.is_empty()) {
+		set_process_internal(false);
+		return;
+	}
+
+	pending_lightmap_frames--;
+	if (pending_lightmap_frames > 0) {
+		return;
+	}
+
+	set_process_internal(false);
+	Vector<String> missing_node_paths;
+	for (int idx : pending_lightmap_users) {
+		missing_node_paths.push_back(String(light_data->get_user_path(idx)));
+	}
+	pending_lightmap_users.clear();
+	String missing_paths_text;
+	if (missing_node_paths.size() <= 3) {
+		missing_paths_text = String(", ").join(missing_node_paths);
+	} else {
+		missing_paths_text = vformat("%s and %d more", String(", ").join(missing_node_paths.slice(0, 3)), missing_node_paths.size() - 3);
+	}
+	WARN_PRINT(vformat("%s couldn't find previously baked nodes and needs a rebake (missing nodes: %s).", get_name(), missing_paths_text));
 }
 
 void LightmapGI::_clear_lightmaps() {
@@ -1999,6 +2107,14 @@ int LightmapGI::get_max_texture_size() const {
 	return max_texture_size;
 }
 
+void LightmapGI::set_cross_zone_bake(bool p_enable) {
+	cross_zone_bake = p_enable;
+}
+
+bool LightmapGI::is_cross_zone_bake() const {
+	return cross_zone_bake;
+}
+
 void LightmapGI::set_supersampling_enabled(bool p_enable) {
 	supersampling_enabled = p_enable;
 
@@ -2142,6 +2258,8 @@ void LightmapGI::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_max_texture_size", "max_texture_size"), &LightmapGI::set_max_texture_size);
 	ClassDB::bind_method(D_METHOD("get_max_texture_size"), &LightmapGI::get_max_texture_size);
 
+	ClassDB::bind_method(D_METHOD("set_cross_zone_bake", "enable"), &LightmapGI::set_cross_zone_bake);
+	ClassDB::bind_method(D_METHOD("is_cross_zone_bake"), &LightmapGI::is_cross_zone_bake);
 	ClassDB::bind_method(D_METHOD("set_supersampling_enabled", "enable"), &LightmapGI::set_supersampling_enabled);
 	ClassDB::bind_method(D_METHOD("is_supersampling_enabled"), &LightmapGI::is_supersampling_enabled);
 
@@ -2203,6 +2321,8 @@ void LightmapGI::_bind_methods() {
 
 	ADD_GROUP("Gen Probes", "generate_probes_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "generate_probes_subdiv", PROPERTY_HINT_ENUM, "Disabled,4,8,16,32"), "set_generate_probes", "get_generate_probes");
+	ADD_GROUP("Zones", "");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "cross_zone_bake"), "set_cross_zone_bake", "is_cross_zone_bake");
 	ADD_GROUP("Data", "");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "light_data", PROPERTY_HINT_RESOURCE_TYPE, LightmapGIData::get_class_static()), "set_light_data", "get_light_data");
 

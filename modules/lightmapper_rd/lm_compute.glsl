@@ -314,6 +314,10 @@ uint trace_ray_closest_hit_triangle(vec3 p_from, vec3 p_to, out uint r_triangle,
 	return trace_ray(p_from, p_to, false, distance, normal, r_triangle, r_barycentric);
 }
 
+vec3 transmission_tint(vec4 p_albedo_alpha) {
+	return mix(vec3(1.0), p_albedo_alpha.rgb, smoothstep(0.0, 0.05, p_albedo_alpha.a));
+}
+
 uint trace_ray_closest_hit_triangle_albedo_alpha(vec3 p_from, vec3 p_to, out vec4 albedo_alpha, out vec3 hit_position) {
 	float distance;
 	vec3 normal;
@@ -608,7 +612,7 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 							soft_shadow_hits += 1;
 
 							if (contribute) {
-								sample_penumbra_color = mix(sample_penumbra_color, sample_penumbra_color * hit_albedo.rgb, hit_albedo.a);
+								sample_penumbra_color *= transmission_tint(hit_albedo);
 								sample_penumbra *= 1.0 - hit_albedo.a;
 							}
 							origin = hit_position + shadow_dir * bake_params.bias;
@@ -646,7 +650,7 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 						}
 
 						if (contribute) {
-							sample_penumbra_color = mix(sample_penumbra_color, sample_penumbra_color * hit_albedo.rgb, hit_albedo.a);
+							sample_penumbra_color *= transmission_tint(hit_albedo);
 							sample_penumbra *= 1.0 - hit_albedo.a;
 						}
 						origin = hit_position + shadow_dir * bake_params.bias;
@@ -686,7 +690,7 @@ void trace_direct_light(vec3 p_position, vec3 p_normal, uint p_light_index, bool
 				}
 
 				if (contribute) {
-					penumbra_color = mix(penumbra_color, penumbra_color * hit_albedo.rgb, hit_albedo.a);
+					penumbra_color *= transmission_tint(hit_albedo);
 					penumbra *= 1.0 - hit_albedo.a;
 				}
 
@@ -781,6 +785,8 @@ vec3 trace_indirect_light(vec3 p_position, vec3 p_ray_dir, inout uint r_noise, f
 				float pa = albedo_alpha.a * albedo_alpha.a;
 				if (randomize(r_noise) > pa) {
 					normal = prev_normal;
+					// The light that continues through the surface is filtered by its colour.
+					throughput *= transmission_tint(albedo_alpha);
 				}
 
 				position += normal * bake_params.bias;
@@ -903,6 +909,11 @@ void main() {
 			vec4(0.0, 0.0, 0.0, 1.0));
 #endif
 
+	// Backlight (material "backlight" property): light reaching the back side of a thin surface comes through,
+	// scaled by this strength. The lightmap stores irradiance, so the runtime albedo multiply tints it like the
+	// real-time backlight does. Shadow rays start on the back side, so the surface doesn't occlude itself.
+	float backlight = texelFetch(sampler2DArray(emission_tex, linear_sampler), ivec3(atlas_pos, params.atlas_slice), 0).a;
+
 	// Use atlas position and a prime number as the seed.
 	uint noise = random_seed(ivec3(atlas_pos, 43573547));
 	for (uint i = 0; i < bake_params.light_count; i++) {
@@ -910,6 +921,22 @@ void main() {
 		vec3 light_dir;
 		float shadow;
 		trace_direct_light(position, normal, i, true, light, light_dir, noise, texel_size_world_space, shadow);
+
+		if (backlight > 0.0001) {
+			vec3 back_light;
+			vec3 back_dir;
+			float back_shadow;
+			trace_direct_light(position, -normal, i, true, back_light, back_dir, noise, texel_size_world_space, back_shadow);
+			back_light *= backlight;
+			if (lights.data[i].static_bake) {
+				light_for_texture += back_light;
+#ifdef USE_SH_LIGHTMAPS
+				// Transmitted light has no meaningful direction on the front side: add it to L0 only.
+				sh_accum[0].rgb += back_light * bake_params.exposure_normalization;
+#endif
+			}
+			light_for_bounces += back_light * lights.data[i].indirect_energy;
+		}
 
 		if (lights.data[i].static_bake) {
 			light_for_texture += light;

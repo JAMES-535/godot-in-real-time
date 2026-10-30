@@ -38,6 +38,8 @@
 #include "servers/rendering/shader_compiler.h"
 #include "servers/rendering/shader_language.h"
 #include "servers/rendering/storage/material_storage.h"
+
+#include <atomic>
 #include "servers/rendering/storage/utilities.h"
 
 struct Projection;
@@ -100,7 +102,7 @@ public:
 		virtual void set_render_priority(int p_priority) = 0;
 		virtual void set_next_pass(RID p_pass) = 0;
 		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) = 0;
-		// False while the material's shader is still compiling
+		// False while the material's shader is still compiling, a queued update is then deferred instead of blocking the render thread.
 		virtual bool is_shader_ready() const { return true; }
 		virtual ~MaterialData();
 
@@ -299,6 +301,7 @@ private:
 		uint32_t shader_id = 0;
 		bool uniform_dirty = false;
 		bool texture_dirty = false;
+		std::atomic<bool> waiting_for_shader{ false };
 		HashMap<StringName, Variant> params;
 		int32_t priority = 0;
 		RID next_pass;
@@ -513,6 +516,11 @@ public:
 
 	void material_set_data_request_function(ShaderType p_shader_type, MaterialDataRequestFunction p_function);
 	MaterialDataRequestFunction material_get_data_request_function(ShaderType p_shader_type);
+
+	_FORCE_INLINE_ bool material_is_waiting_for_shader(RID p_material) {
+		Material *material = material_owner.get_or_null(p_material);
+		return material && material->waiting_for_shader.load(std::memory_order_relaxed);
+	}
 
 	_FORCE_INLINE_ uint32_t material_get_shader_id(RID p_material) {
 		Material *material = material_owner.get_or_null(p_material);
